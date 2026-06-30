@@ -1,0 +1,59 @@
+{
+  "name": "HStudio ESP-SparkBot Firmware",
+  "version": "esp32-sparkbot-wifi-setup",
+  "buildDate": "2026-06-29",
+  "chip": "esp32s3",
+  "flashSize": "16MB",
+  "flashMode": "qio",
+  "flashFrequency": "80m",
+  "psram": "8MB OPI",
+  "hardware": {
+    "board": "ESP-SparkBot (ESP32-S3 + ST7789 240x240 LCD + ES8311 + OV2640)",
+    "i2c": {
+      "sda": 4,
+      "scl": 5
+    },
+    "i2s": {
+      "bclk": 39,
+      "mclk": 45,
+      "ws": 41,
+      "dout": 42,
+      "din": 40
+    },
+    "lcd": {
+      "controller": "ST7789",
+      "width": 240,
+      "height": 240,
+      "spiHost": "SPI3_HOST",
+      "mosi": 47,
+      "clk": 21,
+      "cs": 44,
+      "dc": 43,
+      "backlight": 46
+    },
+    "codec": {
+      "chip": "ES8311",
+      "address": "0x18"
+    },
+    "bootButton": 0,
+    "led": 3,
+    "camera": "OV2640"
+  },
+  "features": [
+    "Wi-Fi setup portal",
+    "Open HStudio-WIFI setup access point",
+    "Pre-AP Wi-Fi network scan dropdown",
+    "Manual Wi-Fi SSID fallback",
+    "Provisioning success page with LAN IP redirect",
+    "Saved Wi-Fi reconnect",
+    "LAN device tab",
+    "Fixed-port UDP Hermes endpoint discovery",
+    "Separate Web UI and desktop endpoint listing",
+    "MCU login form for discovered endpoints",
+    "Profile selection after MCU login",
+    "Socket.IO client connection to selected Hermes Web UI",
+    "ST7789 240x240 color LCD status UI and idle animation",
+    "ES8311 microphone voice recording and streaming",
+    "Green LED status indicator"
+  ]
+}

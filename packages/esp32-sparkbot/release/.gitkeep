@@ -1,0 +1,2 @@
+# Place the built firmware.bin here after running `pio run`.
+# The build output is at packages/esp32-sparkbot/.pio/build/esp32-s3-devkitc-1/firmware.bin.
