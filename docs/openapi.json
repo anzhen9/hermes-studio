@@ -13,6 +13,122 @@
   ],
   "tags": [
     {
+      "name": "Anthropic Auth",
+      "description": "Anthropic OAuth"
+    },
+    {
+      "name": "Chat Run",
+      "description": "Chat run HTTP and Socket.IO bridge operations"
+    },
+    {
+      "name": "Codex Auth",
+      "description": "OpenAI Codex OAuth"
+    },
+    {
+      "name": "Config",
+      "description": "Configuration management"
+    },
+    {
+      "name": "Copilot Auth",
+      "description": "GitHub Copilot OAuth"
+    },
+    {
+      "name": "Jobs",
+      "description": "Scheduled job management"
+    },
+    {
+      "name": "Download",
+      "description": "File download"
+    },
+    {
+      "name": "Files",
+      "description": "Hermes file browser"
+    },
+    {
+      "name": "Gemini Auth",
+      "description": "Google Gemini OAuth"
+    },
+    {
+      "name": "Group Chat",
+      "description": "Group chat management"
+    },
+    {
+      "name": "Kanban",
+      "description": "Kanban board and task management"
+    },
+    {
+      "name": "Logs",
+      "description": "Log file access"
+    },
+    {
+      "name": "MCP",
+      "description": "MCP server and tool management"
+    },
+    {
+      "name": "Media",
+      "description": "Media generation endpoints"
+    },
+    {
+      "name": "Memory",
+      "description": "Agent memory files"
+    },
+    {
+      "name": "Models",
+      "description": "Model configuration"
+    },
+    {
+      "name": "Nous Auth",
+      "description": "Nous Research OAuth"
+    },
+    {
+      "name": "Performance",
+      "description": "Runtime performance monitoring"
+    },
+    {
+      "name": "Plugins",
+      "description": "Plugin browsing and management"
+    },
+    {
+      "name": "Profiles",
+      "description": "Hermes profile management"
+    },
+    {
+      "name": "Providers",
+      "description": "Model provider management"
+    },
+    {
+      "name": "Runtime Versions",
+      "description": "Runtime and Web UI version management"
+    },
+    {
+      "name": "Sessions",
+      "description": "Chat session management"
+    },
+    {
+      "name": "Skills",
+      "description": "Skill browsing and management"
+    },
+    {
+      "name": "STT",
+      "description": "Speech-to-text transcription and settings"
+    },
+    {
+      "name": "TTS",
+      "description": "Text-to-speech generation and settings"
+    },
+    {
+      "name": "Weixin",
+      "description": "WeChat QR code login"
+    },
+    {
+      "name": "Write Gate",
+      "description": "Hermes Agent write approval review"
+    },
+    {
+      "name": "xAI Auth",
+      "description": "xAI OAuth"
+    },
+    {
       "name": "Health",
       "description": "Health check"
     },
