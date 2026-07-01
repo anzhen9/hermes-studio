@@ -13,7 +13,7 @@ export interface ActivePet {
   submittedBy: string
   source: 'petdex'
   mime: string
-  spritesheetDataUrl: string
+  spritesheetDataUrl?: string
   spritesheetRevision: number
   frameW: number
   frameH: number

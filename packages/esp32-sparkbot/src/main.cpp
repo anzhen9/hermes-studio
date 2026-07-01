@@ -3509,6 +3509,7 @@ bool refreshActivePetDisplay(bool force) {
   }
   http.addHeader(F("Authorization"), String(F("Bearer ")) + mcuAuthToken);
   http.addHeader(F("X-Hermes-Profile"), selectedProfile);
+  http.addHeader(F("X-Hermes-Client"), F("mcu"));
 
   int code = http.GET();
   String body = http.getString();

@@ -504,7 +504,7 @@ watch(pet, active => {
       startAnimation()
     })
   }
-  nextImage.src = active.spritesheetDataUrl
+  if (active.spritesheetDataUrl) nextImage.src = active.spritesheetDataUrl
 }, { immediate: true })
 
 watch([stateRow, scale], () => draw())

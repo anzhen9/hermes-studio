@@ -44,7 +44,7 @@ export interface ActivePetResponse {
   submittedBy: string
   source: 'petdex'
   mime: string
-  spritesheetDataUrl: string
+  spritesheetDataUrl?: string
   spritesheetRevision: number
   frameW: number
   frameH: number
@@ -345,14 +345,14 @@ export async function adoptPetFromPetdex(profile: string, slugInput: string): Pr
   return response
 }
 
-export async function getActivePet(profile: string): Promise<ActivePetResponse | null> {
+export async function getActivePet(profile: string, options: { lightweight?: boolean } = {}): Promise<ActivePetResponse | null> {
   const active = await readJsonFile<ActivePetConfig>(activePetPath(profile))
   if (!active?.enabled || !active.slug) return null
 
   const installed = await readJsonFile<InstalledPet>(petMetaPath(profile, active.slug))
   if (!installed) return null
 
-  return buildActivePetResponse(profile, installed, active)
+  return buildActivePetResponse(profile, installed, active, options)
 }
 
 export async function updateActivePetPreferences(
@@ -391,13 +391,20 @@ async function buildActivePetResponse(
   profile: string,
   installed: InstalledPet,
   active: ActivePetConfig,
+  options: { lightweight?: boolean } = {},
 ): Promise<ActivePetResponse | null> {
   const filePath = join(petDir(profile, installed.slug), installed.spritesheetFile || 'spritesheet.webp')
   if (!existsSync(filePath)) return null
 
-  const data = await readFile(filePath)
   const spritesheetRevision = installed.updatedAt || installed.installedAt || 0
   const updatedAt = Math.max(active.updatedAt || 0, spritesheetRevision)
+
+  let spritesheetDataUrl: string | undefined
+  if (!options.lightweight) {
+    const data = await readFile(filePath)
+    spritesheetDataUrl = `data:${installed.mime || 'image/webp'};base64,${data.toString('base64')}`
+  }
+
   return {
     enabled: active.enabled,
     slug: installed.slug,
@@ -406,7 +413,7 @@ async function buildActivePetResponse(
     submittedBy: installed.submittedBy,
     source: installed.source,
     mime: installed.mime || 'image/webp',
-    spritesheetDataUrl: `data:${installed.mime || 'image/webp'};base64,${data.toString('base64')}`,
+    spritesheetDataUrl,
     frameW: FRAME_W,
     frameH: FRAME_H,
     framesPerState: FRAMES_PER_STATE,
