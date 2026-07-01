@@ -158,17 +158,21 @@ describe('LAN discovery', () => {
   it('registers device request routes before auth and management routes behind super admin auth', () => {
     const source = readFileSync('packages/server/src/routes/index.ts', 'utf8')
     const deviceRoutesSource = readFileSync('packages/server/src/routes/devices.ts', 'utf8')
+    const petdexRoutesSource = readFileSync('packages/server/src/routes/hermes/petdex.ts', 'utf8')
     const bootstrapSource = readFileSync('packages/server/src/index.ts', 'utf8')
 
     const authIndex = source.indexOf('authMiddleware.forEach')
     const publicDeviceIndex = source.indexOf('app.use(devicePublicRoutes.routes())')
+    const petdexPublicIndex = source.indexOf('app.use(petdexPublicRoutes.routes())')
     const deviceIndex = source.indexOf('app.use(deviceRoutes.routes())')
 
     expect(authIndex).toBeGreaterThanOrEqual(0)
     expect(publicDeviceIndex).toBeGreaterThanOrEqual(0)
+    expect(petdexPublicIndex).toBeGreaterThanOrEqual(0)
     expect(deviceIndex).toBeGreaterThanOrEqual(0)
     expect(deviceRoutesSource).toContain("devicePublicRoutes.post('/api/devices/link-status'")
     expect(deviceRoutesSource).toContain("devicePublicRoutes.get('/api/devices/link-info'")
+    expect(petdexRoutesSource).toContain("petdexPublicRoutes.get('/api/hermes/petdex/asset'")
     expect(deviceRoutesSource).toContain("import { requireSuperAdmin }")
     expect(deviceRoutesSource).toContain('deviceRoutes.use(requireSuperAdmin)')
     expect(deviceRoutesSource).toContain("deviceRoutes.get('/api/devices/pairing-link'")
@@ -179,6 +183,7 @@ describe('LAN discovery', () => {
     expect(deviceRoutesSource).toContain("deviceRoutes.get('/api/devices/peer-connections/:connectionId/terminals'")
     expect(bootstrapSource).toContain('getLanPeerSocketPath()')
     expect(publicDeviceIndex).toBeLessThan(authIndex)
+    expect(petdexPublicIndex).toBeLessThan(authIndex)
     expect(deviceIndex).toBeGreaterThan(authIndex)
   })
 
