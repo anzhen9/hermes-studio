@@ -82,6 +82,7 @@ export default {
     edit: 'Edit',
     save: 'Save',
     retry: 'Retry',
+    reset: 'Reset',
     saved: 'Saved',
     update: 'Update',
     create: 'Create',
@@ -437,6 +438,7 @@ export default {
     outlineEmpty: 'No conversation content',
     outlineUserQuestion: 'User question',
     inputPlaceholder: 'Type a message... (Enter to send, Shift+Enter for new line)',
+    inputHeightResizeHint: 'Drag to resize the chat input. Double-click to reset.',
     slashCommandArgs: {
       message: '<message>',
       title: '<title>',
@@ -1345,6 +1347,7 @@ export default {
     export: 'Export',
     rename: 'Rename',
     delete: 'Delete',
+    editConfig: 'Edit Config',
     switchTo: 'Switch Hermes Profile',
     switchConfirm: 'This will run `hermes profile use {name}` and change the active Hermes CLI profile. Continue?',
     switchSuccess: 'Hermes active profile switched to "{name}"',
@@ -1487,6 +1490,8 @@ export default {
       themeLight: 'Light',
       themeDark: 'Dark',
       themeSystem: 'System',
+      chatInputHeight: 'Chat input height',
+      chatInputHeightHint: 'Default desktop chat input height in pixels. Mobile keeps auto height.'
     },
     agent: {
       maxTurns: 'Max Turns',
@@ -2294,6 +2299,12 @@ export default {
 
   // Changelog
   changelog: {
+    new_0_6_23_1: 'This release covers the PRs merged after 0.6.22, with updates to desktop self-update, MCP cleanup, Petdex pets, MCU voice, and several settings workflows',
+    new_0_6_23_2: 'Desktop self-update is back to a blocking flow, Windows shuts services down more reliably before updating, and desktop exit now cleans up gateway, profile MCP, and related child processes more completely',
+    new_0_6_23_3: 'Desktop MCP injection and Coding Agent MCP launch paths are more stable, Windows workspaces gained a drive picker, and symlink folder display plus desktop Petdex previews were fixed',
+    new_0_6_23_4: 'Petdex pets now support web pets, a standalone desktop pet window, immediate display after adoption, a top-right close control, and a more visible initial desktop size',
+    new_0_6_23_5: 'MCU and global voice handling now include audio prompts, OTA safeguards, segmented streaming TTS, cleanup for links, code blocks, and tables before speech, plus abort handling for unfinished TTS generation',
+    new_0_6_23_6: 'Settings and workflow polish continue with profile config editing, chat input height settings, login JWT expiry configuration, Skill editing, preserved local archive state in History, clearer new-chat drawer wording, and safer built-in Provider danger text',
     new_0_6_22_1: 'This release covers the PRs merged after 0.6.21, with front-end updates for combination models, session history, proxy settings, slash commands, and mobile layout polish',
     new_0_6_22_2: 'The Models page now includes a Combination Models panel, and chat can show real MoA reference and aggregator progress without the old synthetic placeholder tool',
     new_0_6_22_3: 'Chat sessions can be archived from the session list and restored from History, while local-only Claude Code and Codex sessions now appear correctly in History',

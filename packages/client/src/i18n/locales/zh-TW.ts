@@ -80,6 +80,7 @@ export default {
     cancel: '取消',
     delete: '刪除',
     retry: '重試',
+    reset: '重置',
     edit: '編輯',
     save: '儲存',
     saved: '已儲存',
@@ -424,6 +425,7 @@ export default {
     outlineEmpty: '暫無會話內容',
     outlineUserQuestion: '使用者問題',
     inputPlaceholder: '輸入訊息... (Enter 發送，Shift+Enter 換行)',
+    inputHeightResizeHint: '拖曳調整聊天輸入框高度，雙擊可恢復自動高度。',
     slashCommandArgs: {
       message: '<訊息>',
       title: '<標題>',
@@ -563,6 +565,7 @@ export default {
     sessionLinkCopied: 'Session link copied',
     copySessionId: '複製工作階段 ID',
     export: '匯出',
+    editConfig: '編輯設定檔',
     exportFull: '完整匯出 (JSON)',
     exportCompressed: '壓縮匯出 (TXT)',
     exportCompressing: '正在壓縮上下文，請稍候...',
@@ -1490,8 +1493,8 @@ export default {
       notifyOnCompleteUnsupported: '目前瀏覽器不支援通知',
       notifyOnCompleteTest: '通知已開啟。',
       notifyOnCompleteTestButton: '測試',
-      notifyOnCompleteTesting: '正在傳送測試通知...',
-      notifyOnCompleteTestSent: '測試通知已傳送',
+      notifyOnCompleteTesting: '正在發送測試通知...',
+      notifyOnCompleteTestSent: '測試通知已送出',
       notifyOnCompleteTestFailed: '測試通知傳送失敗',
       busyInputMode: '忙碌輸入模式',
       busyInputModeHint: 'AI 處理中仍可輸入',
@@ -1500,6 +1503,8 @@ export default {
       themeLight: '淺色',
       themeDark: '暗色',
       themeSystem: '跟隨系統',
+      chatInputHeight: '聊天輸入框高度',
+      chatInputHeightHint: '桌面端聊天輸入框預設高度（像素）。行動端保持自動高度。'
     },
     agent: {
       maxTurns: '最大輪次',
@@ -2320,6 +2325,12 @@ export default {
 
   // 更新日誌
   changelog: {
+    new_0_6_23_1: '本次版本整理 0.6.22 之後合併的 PR，重點更新桌面端升級流程、MCP 行程清理、Petdex 寵物、MCU 語音體驗和多處設定入口',
+    new_0_6_23_2: '桌面端自動更新恢復為阻塞式流程，並強化 Windows 更新前的服務關閉；退出桌面端時會更完整地停止 gateway、profile MCP 和相關子行程',
+    new_0_6_23_3: '桌面端 MCP 注入和 Coding Agent MCP 啟動路徑更穩定，Windows workspace 支援磁碟選擇器，並修復符號連結目錄顯示與桌面 Petdex 預覽問題',
+    new_0_6_23_4: '新增 Petdex 寵物體驗：支援 Web 寵物、桌面獨立寵物視窗、領養後即時顯示、右上角關閉按鈕和更合適的桌面初始尺寸',
+    new_0_6_23_5: 'MCU 與全域語音體驗升級：增加音訊提示與 OTA 防護，支援分段串流 TTS，自動清理連結、程式碼區塊和表格等不適合朗讀的內容，並能在中斷時停止未完成的語音生成',
+    new_0_6_23_6: '設定與工作流程細節繼續完善：新增 profile 設定編輯、聊天輸入框高度設定、登入 JWT 有效期設定、Skill 編輯、History 本機封存狀態保留，並優化新聊天抽屜和內建 Provider 危險操作文案',
     new_0_6_22_1: '本次版本整理 0.6.21 之後合併的 PR，重點更新組合模型、會話歷史、代理設定、斜線命令和行動端布局細節',
     new_0_6_22_2: '模型頁面新增組合模型面板，聊天中可以顯示真實的 MoA reference 與 aggregator 進度，不再依賴舊的前端占位工具',
     new_0_6_22_3: '聊天會話支援從會話列表封存，並可在歷史記錄中還原；本機-only 的 Claude Code 和 Codex 會話也會正確出現在歷史記錄中',
