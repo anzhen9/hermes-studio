@@ -5,5 +5,6 @@ export const petRoutes = new Router()
 
 petRoutes.get('/api/hermes/pets/active', ctrl.active)
 petRoutes.get('/api/hermes/pets/active-sprite', ctrl.activeSprite)
+petRoutes.get('/api/hermes/pets/pet-state', ctrl.petState)
 petRoutes.patch('/api/hermes/pets/active', ctrl.updateActive)
 petRoutes.post('/api/hermes/pets/adopt', ctrl.adopt)

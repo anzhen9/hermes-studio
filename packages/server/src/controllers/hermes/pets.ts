@@ -2,6 +2,7 @@ import type { Context } from 'koa'
 import { getActiveProfileName } from '../../services/hermes/hermes-profile'
 import { logger } from '../../services/logger'
 import { PetAdoptionError, adoptPetFromPetdex, getActivePet, getActivePetSprite, updateActivePetPreferences } from '../../services/hermes/pets'
+import { getPetStateSnapshot } from '../../services/hermes/pet-state-socket'
 
 function requestedProfile(ctx: Context): string {
   return ctx.state.profile?.name || getActiveProfileName() || 'default'
@@ -28,7 +29,12 @@ export async function activeSprite(ctx: Context) {
   ctx.set('Cache-Control', 'public, max-age=60')
   ctx.set('X-Hermes-Image-Width', String(sprite.width))
   ctx.set('X-Hermes-Image-Height', String(sprite.height))
+  ctx.set('X-Hermes-Image-Rows', String(sprite.rowCount))
   ctx.body = sprite.buffer
+}
+
+export async function petState(ctx: Context) {
+  ctx.body = getPetStateSnapshot(requestedProfile(ctx))
 }
 
 export async function adopt(ctx: Context) {
