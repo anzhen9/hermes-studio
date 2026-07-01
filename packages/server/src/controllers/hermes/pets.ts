@@ -12,7 +12,8 @@ function errorMessage(err: unknown): string {
 }
 
 export async function active(ctx: Context) {
-  ctx.body = { pet: await getActivePet(requestedProfile(ctx)) }
+  const lightweight = ctx.get('X-Hermes-Client') === 'mcu'
+  ctx.body = { pet: await getActivePet(requestedProfile(ctx), { lightweight }) }
 }
 
 export async function activeSprite(ctx: Context) {
