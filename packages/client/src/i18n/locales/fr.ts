@@ -79,6 +79,7 @@ export default {
     loading: 'Chargement...',
     cancel: 'Annuler',
     retry: 'Réessayer',
+    reset: 'Réinitialiser',
     delete: 'Supprimer',
     edit: 'Modifier',
     save: 'Enregistrer',
@@ -422,6 +423,7 @@ export default {
     outlineEmpty: 'Aucun contenu de conversation',
     outlineUserQuestion: 'Question utilisateur',
     inputPlaceholder: 'Tapez un message... (Entree pour envoyer, Shift+Entree pour un saut de ligne)',
+    inputHeightResizeHint: 'Faites glisser pour changer la hauteur du champ de chat, double-cliquez pour reinitialiser.',
     slashCommandArgs: {
       message: '<message>',
       title: '<titre>',
@@ -525,6 +527,7 @@ export default {
     sessionLinkCopied: 'Session link copied',
     copySessionId: "Copier l'ID de session",
     export: 'Exporter',
+    editConfig: 'Modifier la configuration',
     exportFull: 'Export complet (JSON)',
     exportCompressed: 'Export compressé (TXT)',
     exportCompressing: 'Compression du contexte, veuillez patienter...',
@@ -1236,6 +1239,8 @@ jobTriggered: 'Job declenche',
       themeLight: 'Clair',
       themeDark: 'Sombre',
       themeSystem: 'Systeme',
+      chatInputHeight: 'Hauteur de saisie du chat',
+      chatInputHeightHint: 'Hauteur par défaut de la zone de saisie sur ordinateur, en pixels. Le mobile reste automatique.'
     },
     agent: {
       maxTurns: 'Tours maximum',
@@ -1930,6 +1935,12 @@ jobTriggered: 'Job declenche',
 
   // Journal des modifications
   changelog: {
+    new_0_6_23_1: 'Cette version couvre les PR fusionnees depuis 0.6.22, avec des mises a jour pour l auto-update desktop, le nettoyage MCP, les pets Petdex, la voix MCU et plusieurs parcours de reglages',
+    new_0_6_23_2: 'L auto-update desktop revient a un flux bloquant, Windows arrete les services plus proprement avant la mise a jour, et la sortie desktop nettoie mieux gateway, profile MCP et les processus enfants associes',
+    new_0_6_23_3: 'L injection MCP desktop et les chemins de lancement MCP du Coding Agent sont plus stables, les workspaces Windows gagnent un selecteur de disque, et l affichage des dossiers symlink ainsi que les apercus Petdex desktop sont corriges',
+    new_0_6_23_4: 'Les pets Petdex prennent maintenant en charge les pets web, une fenetre desktop dediee, l affichage immediat apres adoption, un bouton de fermeture en haut a droite et une taille initiale desktop plus visible',
+    new_0_6_23_5: 'La voix MCU et globale ajoute des invites audio, des protections OTA, du TTS segmente en streaming, le nettoyage des liens, blocs de code et tableaux avant lecture, ainsi que l annulation des generations TTS inachevees',
+    new_0_6_23_6: 'Les reglages et workflows ajoutent l edition de config profile, la hauteur de saisie du chat, l expiration JWT de login, l edition des Skills, la conservation de l etat archive local dans History, un libelle plus clair pour le tiroir de nouveau chat et des textes de danger plus surs pour les Providers integres',
     new_0_6_22_1: 'Cette version couvre les PR fusionnees depuis 0.6.21, avec des mises a jour front-end pour les modeles combines, l historique des sessions, les parametres proxy, les commandes slash et les finitions mobiles',
     new_0_6_22_2: 'La page Modeles inclut maintenant un panneau de modeles combines, et le chat peut afficher la progression reelle des references et agregateurs MoA sans l ancien outil factice',
     new_0_6_22_3: 'Les sessions de chat peuvent etre archivees depuis la liste puis restaurees depuis l historique; les sessions locales Claude Code et Codex apparaissent maintenant correctement dans l historique',

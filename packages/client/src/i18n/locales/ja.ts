@@ -79,6 +79,7 @@ export default {
     loading: '読み込み中...',
     cancel: 'キャンセル',
     retry: '再試行',
+    reset: 'リセット',
     delete: '削除',
     edit: '編集',
     save: '保存',
@@ -422,6 +423,7 @@ export default {
     outlineEmpty: '会話内容はありません',
     outlineUserQuestion: 'ユーザーの質問',
     inputPlaceholder: 'メッセージを入力... (Enter で送信、Shift+Enter で改行)',
+    inputHeightResizeHint: 'ドラッグして入力欄の高さを変更。ダブルクリックでリセット。',
     slashCommandArgs: {
       message: '<メッセージ>',
       title: '<タイトル>',
@@ -525,6 +527,7 @@ export default {
     sessionLinkCopied: 'Session link copied',
     copySessionId: 'セッション ID をコピー',
     export: 'エクスポート',
+    editConfig: '設定を編集',
     exportFull: 'フルエクスポート (JSON)',
     exportCompressed: '圧縮エクスポート (TXT)',
     exportCompressing: 'コンテキストを圧縮中、お待ちください...',
@@ -1236,6 +1239,8 @@ export default {
       themeLight: 'ライト',
       themeDark: 'ダーク',
       themeSystem: 'システム',
+      chatInputHeight: 'チャット入力欄の高さ',
+      chatInputHeightHint: 'デスクトップでの既定の入力欄高さ（px）。モバイルでは自動高さを維持します。'
     },
     agent: {
       maxTurns: '最大ターン数',
@@ -1929,6 +1934,12 @@ export default {
 
   // 更新履歴
   changelog: {
+    new_0_6_23_1: 'このリリースでは 0.6.22 以降にマージされた PR を反映し、デスクトップ更新、MCP クリーンアップ、Petdex ペット、MCU 音声、設定ワークフローを改善しました',
+    new_0_6_23_2: 'デスクトップの自動更新はブロッキング方式に戻り、Windows 更新前のサービス停止がより確実になり、終了時には gateway、profile MCP、関連子プロセスをより完全に停止します',
+    new_0_6_23_3: 'デスクトップ MCP 注入と Coding Agent MCP の起動パスが安定し、Windows workspace にドライブ選択を追加し、シンボリックリンクフォルダ表示とデスクトップ Petdex プレビューを修正しました',
+    new_0_6_23_4: 'Petdex ペットは Web ペット、独立したデスクトップペットウィンドウ、採用後の即時表示、右上の閉じるボタン、見やすいデスクトップ初期サイズに対応しました',
+    new_0_6_23_5: 'MCU とグローバル音声は、音声プロンプト、OTA 保護、分割ストリーミング TTS、読み上げ前のリンク・コードブロック・表の整理、未完了 TTS の中断処理に対応しました',
+    new_0_6_23_6: 'profile 設定編集、チャット入力欄の高さ設定、ログイン JWT 有効期限設定、Skill 編集、History のローカルアーカイブ状態保持、新規チャットドロワー文言、組み込み Provider の危険操作文言を改善しました',
     new_0_6_22_1: 'このリリースでは 0.6.21 以降にマージされた PR を反映し、組み合わせモデル、セッション履歴、プロキシ設定、スラッシュコマンド、モバイルレイアウトを改善しました',
     new_0_6_22_2: 'モデルページに組み合わせモデルパネルを追加し、チャットでは古い合成プレースホルダーツールなしで実際の MoA reference と aggregator の進行状況を表示できます',
     new_0_6_22_3: 'チャットセッションを一覧からアーカイブし、履歴から復元できるようになりました。ローカルのみの Claude Code と Codex セッションも履歴に正しく表示されます',
