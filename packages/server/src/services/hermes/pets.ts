@@ -5,6 +5,7 @@ import { createRequire } from 'node:module'
 import type { OverlayOptions } from 'sharp'
 import { getWebUiHome } from '../../config'
 import { logger } from '../logger'
+import { getGlobalAgentServer } from '../global-agent/server'
 import { fetchPetdexManifest, type PetdexPet } from './petdex'
 
 export type ActivePetState = 'idle' | 'run' | 'review' | 'failed' | 'wave' | 'jump' | 'waiting'
@@ -68,6 +69,8 @@ export interface ActivePetSpriteResponse {
   frameHeight: number
   frameCount: number
   loopMs: number
+  rowCount: number
+  stateRows: string[]
 }
 
 export class PetAdoptionError extends Error {
@@ -285,6 +288,15 @@ function normalizeInstalledPet(pet: PetdexPet, asset: { mime: string }, now: num
   }
 }
 
+function notifyMcuPetChanged(profile: string): void {
+  const server = getGlobalAgentServer()
+  if (!server) return
+  const notified = server.broadcastToMcuClients(profile, { type: 'pet.changed', profile })
+  if (notified > 0) {
+    logger.info({ profile, notified }, '[pets] notified MCU clients of pet change')
+  }
+}
+
 export async function adoptPetFromPetdex(profile: string, slugInput: string): Promise<ActivePetResponse> {
   const slug = safeSlug(slugInput)
   const manifest = await fetchPetdexManifest()
@@ -342,6 +354,7 @@ export async function adoptPetFromPetdex(profile: string, slugInput: string): Pr
       message: 'Installed pet asset is missing',
     })
   }
+  notifyMcuPetChanged(profile)
   return response
 }
 
@@ -456,9 +469,12 @@ async function readCachedSparkbotSprite(profile: string, installed: InstalledPet
     frameHeight?: number
     frameCount?: number
     loopMs?: number
+    rowCount?: number
+    stateRows?: string[]
   }>(metaPath)
   const spritesheetRevision = installed.updatedAt || installed.installedAt || 0
   if (!meta || meta.spritesheetRevision !== spritesheetRevision) return null
+  if (!meta.rowCount || meta.rowCount < 1) return null
 
   const buffer = await readFile(cachePath)
   return {
@@ -469,6 +485,8 @@ async function readCachedSparkbotSprite(profile: string, installed: InstalledPet
     frameHeight: meta.frameHeight || ACTIVE_PET_SPRITE_HEIGHT,
     frameCount: meta.frameCount || FRAMES_PER_STATE,
     loopMs: meta.loopMs || LOOP_MS,
+    rowCount: meta.rowCount,
+    stateRows: meta.stateRows || STATE_ROWS,
   }
 }
 
@@ -487,6 +505,8 @@ async function writeCachedSparkbotSprite(
     frameHeight: sprite.frameHeight,
     frameCount: sprite.frameCount,
     loopMs: sprite.loopMs,
+    rowCount: sprite.rowCount,
+    stateRows: sprite.stateRows,
   })
 }
 
@@ -508,33 +528,43 @@ export async function getActivePetSprite(profile: string): Promise<ActivePetSpri
     const sharp = await loadSharp()
     const metadata = await sharp(source).metadata()
     const frameCount = FRAMES_PER_STATE
+    const rowCount = STATE_ROWS.length
     const composite: OverlayOptions[] = []
 
-    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
-      const baseFrame = sharp(source)
-      const framePipeline = metadata.width && metadata.height && metadata.width >= FRAME_W * frameCount && metadata.height >= FRAME_H
-        ? baseFrame.extract({ left: frameIndex * FRAME_W, top: 0, width: FRAME_W, height: FRAME_H })
-        : metadata.width && metadata.height && metadata.width >= FRAME_W && metadata.height >= FRAME_H
-          ? baseFrame.extract({ left: 0, top: 0, width: FRAME_W, height: FRAME_H })
-          : baseFrame
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const sourceRowTop = rowIndex * FRAME_H
+      const hasFullGrid = metadata.width && metadata.height && metadata.width >= FRAME_W * frameCount && metadata.height >= FRAME_H * rowCount
 
-      const frame = await framePipeline
-        .resize(ACTIVE_PET_SPRITE_WIDTH, ACTIVE_PET_SPRITE_HEIGHT, {
-          fit: 'contain',
-          background: { r: 0, g: 0, b: 0, alpha: 1 },
+      for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+        const baseFrame = sharp(source)
+        const framePipeline = hasFullGrid
+          ? baseFrame.extract({ left: frameIndex * FRAME_W, top: sourceRowTop, width: FRAME_W, height: FRAME_H })
+          : metadata.width && metadata.height && metadata.width >= FRAME_W && metadata.height >= FRAME_H
+            ? baseFrame.extract({ left: 0, top: 0, width: FRAME_W, height: FRAME_H })
+            : baseFrame
+
+        const frame = await framePipeline
+          .resize(ACTIVE_PET_SPRITE_WIDTH, ACTIVE_PET_SPRITE_HEIGHT, {
+            fit: 'contain',
+            background: { r: 0, g: 0, b: 0, alpha: 1 },
+          })
+          .flatten({ background: { r: 0, g: 0, b: 0 } })
+          .removeAlpha()
+          .png()
+          .toBuffer()
+
+        composite.push({
+          input: frame,
+          left: frameIndex * ACTIVE_PET_SPRITE_WIDTH,
+          top: rowIndex * ACTIVE_PET_SPRITE_HEIGHT,
         })
-        .flatten({ background: { r: 0, g: 0, b: 0 } })
-        .removeAlpha()
-        .png()
-        .toBuffer()
-
-      composite.push({ input: frame, left: frameIndex * ACTIVE_PET_SPRITE_WIDTH, top: 0 })
+      }
     }
 
     const { data, info } = await sharp({
       create: {
         width: ACTIVE_PET_SPRITE_WIDTH * frameCount,
-        height: ACTIVE_PET_SPRITE_HEIGHT,
+        height: ACTIVE_PET_SPRITE_HEIGHT * rowCount,
         channels: 3,
         background: { r: 0, g: 0, b: 0 },
       },
@@ -543,7 +573,7 @@ export async function getActivePetSprite(profile: string): Promise<ActivePetSpri
       .raw()
       .toBuffer({ resolveWithObject: true })
 
-    const sprite = {
+    const sprite: ActivePetSpriteResponse = {
       buffer: rgbaToRgb565(data, info.channels),
       width: info.width,
       height: info.height,
@@ -551,6 +581,8 @@ export async function getActivePetSprite(profile: string): Promise<ActivePetSpri
       frameHeight: ACTIVE_PET_SPRITE_HEIGHT,
       frameCount,
       loopMs: LOOP_MS,
+      rowCount,
+      stateRows: STATE_ROWS,
     }
     await writeCachedSparkbotSprite(profile, installed, sprite)
     return sprite

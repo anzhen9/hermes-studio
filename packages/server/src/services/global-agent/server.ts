@@ -484,6 +484,18 @@ export class GlobalAgentServer {
     return true
   }
 
+  broadcastToMcuClients(profile: string, payload: Record<string, unknown>): number {
+    let count = 0
+    for (const socket of this.clients.values()) {
+      const socketProfile = String(socket.data.profile || '').trim()
+      if (socketProfile && socketProfile !== profile) continue
+      const event = typeof payload.type === 'string' && payload.type.trim() ? payload.type.trim() : 'mcu.event'
+      socket.emit(event, payload)
+      count += 1
+    }
+    return count
+  }
+
   startMcuVoiceChatTurn(options: McuVoiceChatTurnOptions): void {
     const sessionId = this.mcuSessionId(options.clientId, options.profile)
     this.emitMcuEvent({

@@ -26,9 +26,9 @@ const IPAddress kApIp(192, 168, 4, 1);
 const IPAddress kApGateway(192, 168, 4, 1);
 const IPAddress kApSubnet(255, 255, 255, 0);
 constexpr char kMissingSttPromptPcmUrl[] =
-    "https://ekko-hermes-studio.oss-cn-beijing.aliyuncs.com/current-profile-stt-not-configured-xiaohe.s16le.pcm";
+    "/api/hermes/mcu/audio/missing-stt-24k.s16le.pcm";
 constexpr char kNoDevicePromptPcmUrl[] =
-    "https://ekko-hermes-studio.oss-cn-beijing.aliyuncs.com/no-device-connected-xiaohe-16k.pcm";
+    "/api/hermes/mcu/audio/no-device-24k.s16le.pcm";
 
 // --- ESP-SparkBot pin definitions (ESP32-S3) ---
 // I2C bus (ES8311 codec)
@@ -61,6 +61,7 @@ constexpr int kActivePetRegionHeight = 136;
 constexpr uint32_t kLcdRefreshIntervalMs = 160;
 constexpr uint32_t kActivePetRefreshIntervalMs = 30000;
 constexpr uint32_t kActivePetRetryMs = 10000;
+constexpr uint32_t kActivePetStateIntervalMs = 3000;
 constexpr uint32_t kProvisionRestartDelayMs = 2500;
 constexpr uint32_t kProvisionRedirectDelayMs = 6500;
 constexpr int kMaxScannedNetworks = 20;
@@ -93,7 +94,8 @@ constexpr uint32_t kVoiceVadPeakStart = 480;
 constexpr uint32_t kVoiceVadActiveThreshold = 260;
 constexpr uint32_t kVoiceVadMinActiveSamples = 16;
 constexpr int kVoiceInputGainPermille = 2800;
-constexpr int kAudioSampleRate = 16000;
+constexpr int kAudioSampleRate = 24000;
+constexpr int kMcuAudioDefaultSampleRate = 24000;
 constexpr size_t kVoiceRecordMaxFrames = (kAudioSampleRate * kVoiceRecordMs) / 1000UL;
 constexpr size_t kVoiceRecordBufferBytes = 44 + kVoiceRecordMaxFrames * sizeof(int16_t);
 constexpr int kVoiceOutputGainPermille = 820;
@@ -196,6 +198,7 @@ struct McuAudioSegment {
   String url;
   String mimeType;
   uint8_t channels = 2;
+  uint32_t sampleRate = kMcuAudioDefaultSampleRate;
   uint32_t durationMs = 0;
   bool completionManagedByServer = false;
 };
@@ -221,6 +224,7 @@ String activeDeviceEndpoint(const __FlashStringHelper *path);
 void clearActivePetDisplay();
 bool refreshActivePetDisplay(bool force = false);
 bool refreshActivePetSprite(bool force = false);
+bool refreshPetState();
 bool downloadAndApplyMcuFirmware(const String &url, const String &md5, int expectedSize);
 
 enum class McuOtaResult : uint8_t {
@@ -262,12 +266,18 @@ struct ActivePetDisplay {
   uint16_t frameWidth = 0;
   uint16_t frameHeight = 0;
   uint16_t spriteStripWidth = 0;
+  uint16_t spriteStripHeight = 0;
+  uint8_t rowCount = 0;
+  uint8_t stateRowIndex = 0;
+  String petState = "idle";
+  uint32_t lastPetStateRefreshAtMs = 0;
   uint16_t *spritePixels = nullptr;
 };
 
 LanDevice lanDevices[kMaxLanDevices];
 int lanDeviceCount = 0;
 ActivePetDisplay activePetDisplay;
+bool petChangePending = false;
 
 enum class LcdMode : uint8_t {
   Boot,
@@ -666,17 +676,18 @@ void drawInteractionFrame() {
 }
 
 void blitRgb565SpriteFrame(int x, int y, const uint16_t *pixels, uint16_t frameWidth, uint16_t frameHeight,
-                           uint16_t stripWidth, uint8_t frameIndex) {
+                           uint16_t stripWidth, uint8_t frameIndex, uint8_t rowIndex = 0) {
   if (!lcdBuffer || !pixels || frameWidth == 0 || frameHeight == 0 || stripWidth < frameWidth) return;
   uint16_t maxFrameIndex = static_cast<uint16_t>(stripWidth / frameWidth);
   uint16_t sourceFrame = maxFrameIndex == 0 ? 0 : min<uint16_t>(frameIndex, maxFrameIndex - 1);
+  size_t rowOffset = static_cast<size_t>(rowIndex) * frameHeight * stripWidth;
   for (uint16_t row = 0; row < frameHeight; ++row) {
     int targetY = y + row;
     if (targetY < 0 || targetY >= kLcdHeight) continue;
     int targetX = x;
     if (targetX >= kLcdWidth || targetX + static_cast<int>(frameWidth) <= 0) continue;
     uint16_t *dst = lcdBuffer + targetY * kLcdWidth + targetX;
-    const uint16_t *src = pixels + static_cast<size_t>(row) * stripWidth + sourceFrame * frameWidth;
+    const uint16_t *src = pixels + rowOffset + static_cast<size_t>(row) * stripWidth + sourceFrame * frameWidth;
     size_t copyWidth = frameWidth;
     if (targetX < 0) {
       size_t skip = static_cast<size_t>(-targetX);
@@ -705,7 +716,8 @@ void drawActivePetFrame() {
     int x = kActivePetRegionX + (kActivePetRegionWidth - activePetDisplay.frameWidth) / 2;
     int y = kActivePetRegionY + (kActivePetRegionHeight - activePetDisplay.frameHeight) / 2;
     blitRgb565SpriteFrame(x, y, activePetDisplay.spritePixels, activePetDisplay.frameWidth,
-                          activePetDisplay.frameHeight, activePetDisplay.spriteStripWidth, frameIndex);
+                          activePetDisplay.frameHeight, activePetDisplay.spriteStripWidth, frameIndex,
+                          activePetDisplay.stateRowIndex);
   }
 }
 
@@ -1317,6 +1329,18 @@ bool configureI2sBus() {
   if (err != ESP_OK) {
     lastAudioDetail = String(F("I2S pin setup failed err=")) + String(static_cast<int>(err));
     i2s_driver_uninstall(kI2sPort);
+    return false;
+  }
+  i2s_zero_dma_buffer(kI2sPort);
+  return true;
+}
+
+bool setI2sSampleRate(uint32_t sampleRate) {
+  if (!i2sReady || sampleRate == 0) return false;
+  esp_err_t err = i2s_set_sample_rates(kI2sPort, sampleRate);
+  if (err != ESP_OK) {
+    lastAudioDetail = String(F("I2S sample rate failed rate=")) + String(sampleRate) +
+                      F(" err=") + String(static_cast<int>(err));
     return false;
   }
   i2s_zero_dma_buffer(kI2sPort);
@@ -2713,7 +2737,7 @@ uint32_t mcuAudioDurationFor(const McuAudioSegment &segment) {
   return min(max(estimated, kMcuAudioDefaultDurationMs), kMcuAudioMaxDurationMs);
 }
 
-bool playPcmStereoStream(WiFiClient *stream, int contentLength) {
+bool playPcmStereoStream(WiFiClient *stream, int contentLength, uint32_t sampleRate) {
   if (!stream || audioBusy || !i2sReady || !es8311Ready) {
     lastAudioDetail = F("audio stream is not ready");
     markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
@@ -2723,6 +2747,7 @@ bool playPcmStereoStream(WiFiClient *stream, int contentLength) {
   audioBusy = true;
   setPowerAmp(true);
   es8311UpdateBits(0x31, 0x60, 0x00);
+  setI2sSampleRate(sampleRate);
 
   constexpr size_t kChunkBytes = 1024;
   constexpr size_t kAudioFrameBytes = 4;
@@ -2801,6 +2826,7 @@ bool playPcmStereoStream(WiFiClient *stream, int contentLength) {
   }
 
   i2s_zero_dma_buffer(kI2sPort);
+  setI2sSampleRate(kAudioSampleRate);
   lastAudioAtMs = millis();
   lastAudioDetail = String(F("pcm played bytes=")) + String(playedBytes) +
                     F(", stream bytes=") + String(streamBytes) +
@@ -2809,7 +2835,7 @@ bool playPcmStereoStream(WiFiClient *stream, int contentLength) {
   return playedBytes > 0;
 }
 
-bool playPcmMonoStream(WiFiClient *stream, int contentLength) {
+bool playPcmMonoStream(WiFiClient *stream, int contentLength, uint32_t sampleRate) {
   if (!stream || audioBusy || !i2sReady || !es8311Ready) {
     lastAudioDetail = F("audio stream is not ready");
     markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
@@ -2819,6 +2845,7 @@ bool playPcmMonoStream(WiFiClient *stream, int contentLength) {
   audioBusy = true;
   setPowerAmp(true);
   es8311UpdateBits(0x31, 0x60, 0x00);
+  setI2sSampleRate(sampleRate > 0 ? sampleRate : kMcuAudioDefaultSampleRate);
 
   constexpr size_t kInputChunkBytes = 512;
   constexpr size_t kMonoFrameBytes = 2;
@@ -2911,6 +2938,7 @@ bool playPcmMonoStream(WiFiClient *stream, int contentLength) {
   }
 
   i2s_zero_dma_buffer(kI2sPort);
+  setI2sSampleRate(kAudioSampleRate);
   lastAudioAtMs = millis();
   lastAudioDetail = String(F("mono pcm played bytes=")) + String(playedBytes) +
                     F(", stream bytes=") + String(streamBytes) +
@@ -2969,7 +2997,7 @@ bool playRecordedWav(uint8_t *wav, size_t wavLen) {
   return playedBytes > 0;
 }
 
-bool playPcmUrl(const String &url, uint8_t channels) {
+bool playPcmUrl(const String &url, uint8_t channels, uint32_t sampleRate) {
   String scheme;
   String host;
   String path;
@@ -3014,13 +3042,15 @@ bool playPcmUrl(const String &url, uint8_t channels) {
     return false;
   }
   if (contentType.indexOf(F("mpeg")) >= 0 || contentType.indexOf(F("mp3")) >= 0) {
-    lastAudioDetail = F("mp3 is not supported on MCU; send 16k PCM");
+    lastAudioDetail = F("mp3 is not supported on MCU; send 24k PCM");
     markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
     client->stop();
     return false;
   }
 
-  bool ok = channels == 1 ? playPcmMonoStream(client, contentLength) : playPcmStereoStream(client, contentLength);
+  uint32_t playbackRate = sampleRate > 0 ? sampleRate : kMcuAudioDefaultSampleRate;
+  bool ok = channels == 1 ? playPcmMonoStream(client, contentLength, playbackRate)
+                          : playPcmStereoStream(client, contentLength, playbackRate);
   client->stop();
   return ok;
 }
@@ -3141,7 +3171,7 @@ void startNextMcuAudio() {
   sendMcuSocketJson(json);
 
   if (mcuCurrentAudio.url.length() > 0) {
-    bool played = playPcmUrl(mcuCurrentAudio.url, mcuCurrentAudio.channels);
+    bool played = playPcmUrl(mcuCurrentAudio.url, mcuCurrentAudio.channels, mcuCurrentAudio.sampleRate);
     String interruptedInteractionId = mcuCurrentAudio.interactionId;
     bool completionManagedByServer = mcuCurrentAudio.completionManagedByServer;
     finishMcuAudio(!played);
@@ -3312,6 +3342,8 @@ void handleMcuAudioEnqueue(uint8_t clientId, const String &message) {
   segment.mimeType = jsonStringValue(message, F("mimeType"));
   int channels = jsonIntValue(message, F("channels"));
   segment.channels = channels == 1 ? 1 : 2;
+  int sampleRate = jsonIntValue(message, F("sampleRate"));
+  segment.sampleRate = sampleRate > 0 ? static_cast<uint32_t>(sampleRate) : kMcuAudioDefaultSampleRate;
   segment.durationMs = static_cast<uint32_t>(jsonIntValue(message, F("durationMs")));
   segment.completionManagedByServer = jsonBoolValue(message, F("completionManagedByServer"));
 
@@ -3365,6 +3397,11 @@ void handleMcuWebSocketText(uint8_t clientId, const String &message) {
     sendWsJson(clientId, mcuStatusJson());
     return;
   }
+  if (type == F("pet.changed")) {
+    Serial.println(F("Pet changed notification received, will refresh"));
+    petChangePending = true;
+    return;
+  }
   sendWsJson(clientId, String(F("{\"type\":\"mcu.unknown\",\"ok\":false,\"received\":\"")) +
                            escapeJson(type) + F("\"}"));
 }
@@ -3378,6 +3415,7 @@ void enqueueMissingSttPrompt(const String &interactionId) {
   segment.url = kMissingSttPromptPcmUrl;
   segment.mimeType = F("audio/x-pcm");
   segment.channels = 1;
+  segment.sampleRate = kMcuAudioDefaultSampleRate;
   enqueueMcuAudio(segment);
 }
 
@@ -3393,6 +3431,7 @@ void enqueueNoDevicePrompt(const String &interactionId) {
   segment.url = kNoDevicePromptPcmUrl;
   segment.mimeType = F("audio/x-pcm");
   segment.channels = 1;
+  segment.sampleRate = kMcuAudioDefaultSampleRate;
   enqueueMcuAudio(segment);
 }
 
@@ -3490,6 +3529,9 @@ bool refreshActivePetDisplay(bool force) {
     if (activePetDisplay.available && (!activePetDisplay.spritePixels || activePetDisplay.loadedSpriteRevision != activePetDisplay.spritesheetRevision)) {
       refreshActivePetSprite(false);
     }
+    if (activePetDisplay.available) {
+      refreshPetState();
+    }
     return activePetDisplay.available;
   }
   if (!wifiReady || WiFi.status() != WL_CONNECTED || activeDeviceUrl.length() == 0 || mcuAuthToken.length() == 0 || selectedProfile.length() == 0) {
@@ -3534,6 +3576,17 @@ bool refreshActivePetDisplay(bool force) {
 
   bool changed = !activePetDisplay.available || activePetDisplay.slug != slug;
 
+  if (changed && activePetDisplay.spritePixels) {
+    free(activePetDisplay.spritePixels);
+    activePetDisplay.spritePixels = nullptr;
+    activePetDisplay.frameWidth = 0;
+    activePetDisplay.frameHeight = 0;
+    activePetDisplay.spriteStripWidth = 0;
+    activePetDisplay.spriteStripHeight = 0;
+    activePetDisplay.rowCount = 0;
+    activePetDisplay.loadedSpriteRevision = 0;
+  }
+
   activePetDisplay.available = true;
   activePetDisplay.slug = slug;
   activePetDisplay.displayName = jsonStringValue(petJson, F("displayName"));
@@ -3543,8 +3596,10 @@ bool refreshActivePetDisplay(bool force) {
   activePetDisplay.frameCount = static_cast<uint8_t>(max(1, jsonIntValue(petJson, F("framesPerState"))));
   activePetDisplay.loopMs = static_cast<uint32_t>(max(1, jsonIntValue(petJson, F("loopMs"))));
   activePetDisplay.spritesheetRevision = static_cast<uint32_t>(jsonIntValue(petJson, F("spritesheetRevision")));
+  activePetDisplay.loadedSpriteRevision = 0;
+  activePetDisplay.lastSpriteRefreshAtMs = 0;
   lcdDirty = true;
-  refreshActivePetSprite(changed);
+  refreshActivePetSprite(true);
   return true;
 }
 
@@ -3565,13 +3620,16 @@ bool refreshActivePetSprite(bool force) {
   if (endpoint.length() == 0) return false;
 
   HTTPClient http;
-  http.setTimeout(12000);
+  http.setTimeout(30000);
   if (!http.begin(endpoint)) {
     activePetDisplay.lastSpriteRefreshAtMs = now;
     return false;
   }
   http.addHeader(F("Authorization"), String(F("Bearer ")) + mcuAuthToken);
   http.addHeader(F("X-Hermes-Profile"), selectedProfile);
+  http.addHeader(F("X-Hermes-Client"), F("mcu"));
+  const char *kSpriteHeaders[] = { "X-Hermes-Image-Rows" };
+  http.collectHeaders(kSpriteHeaders, 1);
 
   int code = http.GET();
   if (code < 200 || code >= 300) {
@@ -3586,6 +3644,8 @@ bool refreshActivePetSprite(bool force) {
       activePetDisplay.frameWidth = 0;
       activePetDisplay.frameHeight = 0;
       activePetDisplay.spriteStripWidth = 0;
+      activePetDisplay.spriteStripHeight = 0;
+      activePetDisplay.rowCount = 0;
       activePetDisplay.loadedSpriteRevision = 0;
     }
     return false;
@@ -3595,7 +3655,15 @@ bool refreshActivePetSprite(bool force) {
   uint16_t frameHeight = kActivePetRegionHeight;
   uint16_t frameCount = max<uint16_t>(activePetDisplay.frameCount, 1);
   uint16_t width = static_cast<uint16_t>(frameWidth * frameCount);
-  uint16_t height = frameHeight;
+
+  uint8_t rowCount = 1;
+  String rowCountHeader = http.header(static_cast<size_t>(0));
+  if (rowCountHeader.length() > 0) {
+    int parsed = rowCountHeader.toInt();
+    if (parsed > 0 && parsed <= 16) rowCount = static_cast<uint8_t>(parsed);
+  }
+
+  uint16_t height = static_cast<uint16_t>(frameHeight * rowCount);
   size_t expectedBytes = static_cast<size_t>(width) * height * sizeof(uint16_t);
   int contentLength = http.getSize();
   if (contentLength > 0 && static_cast<size_t>(contentLength) != expectedBytes) {
@@ -3642,9 +3710,73 @@ bool refreshActivePetSprite(bool force) {
   activePetDisplay.frameWidth = frameWidth;
   activePetDisplay.frameHeight = frameHeight;
   activePetDisplay.spriteStripWidth = width;
+  activePetDisplay.spriteStripHeight = height;
+  activePetDisplay.rowCount = rowCount;
   activePetDisplay.loadedSpriteRevision = activePetDisplay.spritesheetRevision;
   activePetDisplay.lastSpriteRefreshAtMs = now;
   lcdDirty = true;
+  return true;
+}
+
+uint8_t petStateToRowIndex(const String &state) {
+  static const char *kStateRows[] = {
+    "idle", "running-right", "running-left", "waving", "jumping",
+    "failed", "waiting", "running", "review"
+  };
+  static const uint8_t kStateRowCount = sizeof(kStateRows) / sizeof(kStateRows[0]);
+
+  String rowName;
+  if (state == "run") rowName = F("running");
+  else if (state == "wave") rowName = F("waving");
+  else if (state == "jump") rowName = F("jumping");
+  else rowName = state;
+
+  for (uint8_t i = 0; i < kStateRowCount; ++i) {
+    if (rowName == kStateRows[i]) return i;
+  }
+  return 0;
+}
+
+bool refreshPetState() {
+  if (!activePetDisplay.available) return false;
+  uint32_t now = millis();
+  if (activePetDisplay.lastPetStateRefreshAtMs > 0 &&
+      now - activePetDisplay.lastPetStateRefreshAtMs < kActivePetStateIntervalMs) {
+    return true;
+  }
+  activePetDisplay.lastPetStateRefreshAtMs = now;
+
+  String endpoint = activeDeviceEndpoint(F("/api/hermes/pets/pet-state"));
+  if (endpoint.length() == 0) return false;
+
+  HTTPClient http;
+  http.setTimeout(8000);
+  if (!http.begin(endpoint)) return false;
+  http.addHeader(F("Authorization"), String(F("Bearer ")) + mcuAuthToken);
+  http.addHeader(F("X-Hermes-Profile"), selectedProfile);
+  http.addHeader(F("X-Hermes-Client"), F("mcu"));
+
+  int code = http.GET();
+  String body = http.getString();
+  http.end();
+
+  if (code < 200 || code >= 300) {
+    Serial.printf("Pet state HTTP %d\n", code);
+    return false;
+  }
+
+  String state = jsonStringValue(body, F("state"));
+  if (state.length() == 0) state = F("idle");
+
+  uint8_t rowIndex = petStateToRowIndex(state);
+  if (rowIndex >= activePetDisplay.rowCount) rowIndex = 0;
+
+  if (state != activePetDisplay.petState || rowIndex != activePetDisplay.stateRowIndex) {
+    activePetDisplay.petState = state;
+    activePetDisplay.stateRowIndex = rowIndex;
+    lcdDirty = true;
+    Serial.printf("Pet state changed to %s (row %u)\n", state.c_str(), rowIndex);
+  }
   return true;
 }
 
@@ -4798,7 +4930,15 @@ void loop() {
   server.handleClient();
   if (wsReady) mcuSocketLoop();
   tickMcuInteraction();
-  refreshActivePetDisplay();
+  if (petChangePending) {
+    petChangePending = false;
+    Serial.println(F("Processing pet change refresh"));
+    activePetDisplay.lastRefreshedAtMs = 0;
+    activePetDisplay.lastSpriteRefreshAtMs = 0;
+    refreshActivePetDisplay(true);
+  } else {
+    refreshActivePetDisplay();
+  }
   refreshLcd();
   handleBootButton();
   tickStatusLed();
