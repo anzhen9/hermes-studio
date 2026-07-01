@@ -1,6 +1,7 @@
 import type { Context } from 'koa'
 import { getActiveProfileName } from '../../services/hermes/hermes-profile'
-import { adoptPetFromPetdex, getActivePet, updateActivePetPreferences } from '../../services/hermes/pets'
+import { logger } from '../../services/logger'
+import { PetAdoptionError, adoptPetFromPetdex, getActivePet, getActivePetSprite, updateActivePetPreferences } from '../../services/hermes/pets'
 
 function requestedProfile(ctx: Context): string {
   return ctx.state.profile?.name || getActiveProfileName() || 'default'
@@ -14,9 +15,25 @@ export async function active(ctx: Context) {
   ctx.body = { pet: await getActivePet(requestedProfile(ctx)) }
 }
 
+export async function activeSprite(ctx: Context) {
+  const sprite = await getActivePetSprite(requestedProfile(ctx))
+  if (!sprite) {
+    ctx.status = 404
+    ctx.body = { error: 'Pet sprite is not available' }
+    return
+  }
+
+  ctx.set('Content-Type', 'application/octet-stream')
+  ctx.set('Cache-Control', 'public, max-age=60')
+  ctx.set('X-Hermes-Image-Width', String(sprite.width))
+  ctx.set('X-Hermes-Image-Height', String(sprite.height))
+  ctx.body = sprite.buffer
+}
+
 export async function adopt(ctx: Context) {
   const body = ctx.request.body as { slug?: unknown } | undefined
   const slug = typeof body?.slug === 'string' ? body.slug.trim() : ''
+  const profile = requestedProfile(ctx)
   if (!slug) {
     ctx.status = 400
     ctx.body = { error: 'Pet slug is required' }
@@ -24,11 +41,22 @@ export async function adopt(ctx: Context) {
   }
 
   try {
-    ctx.body = { pet: await adoptPetFromPetdex(requestedProfile(ctx), slug) }
+    ctx.body = { pet: await adoptPetFromPetdex(profile, slug) }
   } catch (err) {
+    logger.warn({ err, slug, profile }, '[pets] adopt failed')
     const message = errorMessage(err)
     ctx.status = message.includes('was not found') ? 404 : 400
-    ctx.body = { error: message }
+    ctx.body = err instanceof PetAdoptionError
+      ? {
+          error: message,
+          details: {
+            slug: err.slug,
+            profile: err.profile,
+            stage: err.stage,
+            assetUrl: err.assetUrl,
+          },
+        }
+      : { error: message }
   }
 }
 

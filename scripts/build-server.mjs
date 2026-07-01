@@ -14,11 +14,12 @@ mkdirSync(serverOutDir, { recursive: true })
 await esbuild.build({
   entryPoints: [resolve(rootDir, 'packages/server/src/index.ts')],
   bundle: true,
+  packages: 'external',
   platform: 'node',
   target: 'node23',
   format: 'cjs',
   outfile: resolve(serverOutDir, 'index.js'),
-  external: ['node-pty', 'node:sqlite', 'socket.io'],
+  external: ['node-pty', 'node:sqlite', 'sharp', 'socket.io'],
   define: {
     __APP_VERSION__: JSON.stringify(version),
   },
