@@ -46,7 +46,7 @@ import { performanceMonitorRoutes } from './hermes/performance-monitor'
 import { mcpRoutes } from './hermes/mcp'
 import { runtimeVersionRoutes } from './hermes/runtime-versions'
 import { writeGateRoutes } from './hermes/write-gate'
-import { petdexRoutes } from './hermes/petdex'
+import { petdexPublicRoutes, petdexRoutes } from './hermes/petdex'
 import { petRoutes } from './hermes/pets'
 
 /**
@@ -64,6 +64,7 @@ export function registerRoutes(app: any, authMiddleware: Array<(ctx: Context, ne
   app.use(codexProxyRoutes.routes())
   app.use(ttsRoutes.routes())
   app.use(apiDocsRoutes.routes())
+  app.use(petdexPublicRoutes.routes())
 
   // --- Auth middleware: all routes below require authentication ---
   authMiddleware.forEach((middleware) => app.use(middleware))
