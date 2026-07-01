@@ -2594,7 +2594,7 @@ void logoutDevice() {
 
 String mcuStatusJson() {
   String json;
-  json.reserve(260);
+  json.reserve(340);
   json += F("{\"type\":\"mcu.status\",\"interactionId\":\"");
   json += escapeJson(mcuInteractionId);
   json += F("\",\"status\":\"");
@@ -2617,7 +2617,7 @@ String mcuStatusJson() {
   json += escapeJson(mcuToolName);
   json += F("\",\"toolStatus\":\"");
   json += escapeJson(mcuToolStatus);
-  json += F("\"}");
+  json += F("\",\"batteryKnown\":false,\"batteryLevel\":0,\"batteryVoltageMv\":0}");
   return json;
 }
 
@@ -4666,6 +4666,7 @@ void handleHealth() {
   json += i2sReady ? F("true") : F("false");
   json += F(",\"es8311_ready\":");
   json += es8311Ready ? F("true") : F("false");
+  json += F(",\"battery_known\":false,\"battery_level\":0,\"battery_voltage_mv\":0,\"battery_charging\":false");
   json += F(",\"busy\":");
   json += audioBusy ? F("true") : F("false");
   json += F(",\"last_detail\":\"");
