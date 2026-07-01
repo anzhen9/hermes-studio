@@ -54,7 +54,13 @@ constexpr int kPinLed = 3;
 constexpr uint8_t kEs8311Addr = 0x18;
 constexpr int kLcdWidth = 240;
 constexpr int kLcdHeight = 240;
+constexpr int kActivePetRegionX = 24;
+constexpr int kActivePetRegionY = 34;
+constexpr int kActivePetRegionWidth = 192;
+constexpr int kActivePetRegionHeight = 136;
 constexpr uint32_t kLcdRefreshIntervalMs = 160;
+constexpr uint32_t kActivePetRefreshIntervalMs = 30000;
+constexpr uint32_t kActivePetRetryMs = 10000;
 constexpr uint32_t kProvisionRestartDelayMs = 2500;
 constexpr uint32_t kProvisionRedirectDelayMs = 6500;
 constexpr int kMaxScannedNetworks = 20;
@@ -212,6 +218,9 @@ void mcuSocketLoop();
 bool waitForMcuSocketReady(uint32_t timeoutMs);
 void enqueueNoDevicePrompt(const String &interactionId);
 String activeDeviceEndpoint(const __FlashStringHelper *path);
+void clearActivePetDisplay();
+bool refreshActivePetDisplay(bool force = false);
+bool refreshActivePetSprite(bool force = false);
 bool downloadAndApplyMcuFirmware(const String &url, const String &md5, int expectedSize);
 
 enum class McuOtaResult : uint8_t {
@@ -238,8 +247,27 @@ struct LanDevice {
   bool loggedIn = false;
 };
 
+struct ActivePetDisplay {
+  bool available = false;
+  String slug;
+  String displayName;
+  String kind;
+  String submittedBy;
+  uint8_t frameCount = 1;
+  uint32_t loopMs = 1100;
+  uint32_t spritesheetRevision = 0;
+  uint32_t loadedSpriteRevision = 0;
+  uint32_t lastRefreshedAtMs = 0;
+  uint32_t lastSpriteRefreshAtMs = 0;
+  uint16_t frameWidth = 0;
+  uint16_t frameHeight = 0;
+  uint16_t spriteStripWidth = 0;
+  uint16_t *spritePixels = nullptr;
+};
+
 LanDevice lanDevices[kMaxLanDevices];
 int lanDeviceCount = 0;
+ActivePetDisplay activePetDisplay;
 
 enum class LcdMode : uint8_t {
   Boot,
@@ -637,6 +665,50 @@ void drawInteractionFrame() {
   }
 }
 
+void blitRgb565SpriteFrame(int x, int y, const uint16_t *pixels, uint16_t frameWidth, uint16_t frameHeight,
+                           uint16_t stripWidth, uint8_t frameIndex) {
+  if (!lcdBuffer || !pixels || frameWidth == 0 || frameHeight == 0 || stripWidth < frameWidth) return;
+  uint16_t maxFrameIndex = static_cast<uint16_t>(stripWidth / frameWidth);
+  uint16_t sourceFrame = maxFrameIndex == 0 ? 0 : min<uint16_t>(frameIndex, maxFrameIndex - 1);
+  for (uint16_t row = 0; row < frameHeight; ++row) {
+    int targetY = y + row;
+    if (targetY < 0 || targetY >= kLcdHeight) continue;
+    int targetX = x;
+    if (targetX >= kLcdWidth || targetX + static_cast<int>(frameWidth) <= 0) continue;
+    uint16_t *dst = lcdBuffer + targetY * kLcdWidth + targetX;
+    const uint16_t *src = pixels + static_cast<size_t>(row) * stripWidth + sourceFrame * frameWidth;
+    size_t copyWidth = frameWidth;
+    if (targetX < 0) {
+      size_t skip = static_cast<size_t>(-targetX);
+      if (skip >= copyWidth) continue;
+      src += skip;
+      dst += skip;
+      copyWidth -= skip;
+    }
+    if (targetX + static_cast<int>(copyWidth) > kLcdWidth) {
+      copyWidth = static_cast<size_t>(kLcdWidth - targetX);
+    }
+    memcpy(dst, src, copyWidth * sizeof(uint16_t));
+  }
+}
+
+void drawActivePetFrame() {
+  if (!activePetDisplay.available) return;
+
+  lcdDrawBox(kActivePetRegionX, kActivePetRegionY, kActivePetRegionWidth, kActivePetRegionHeight, kColorBg);
+
+  if (activePetDisplay.spritePixels && activePetDisplay.frameWidth > 0 && activePetDisplay.frameHeight > 0) {
+    uint32_t loopMs = max<uint32_t>(activePetDisplay.loopMs, 1);
+    uint8_t frameCount = max<uint8_t>(activePetDisplay.frameCount, 1);
+    uint8_t frameIndex = static_cast<uint8_t>((millis() % loopMs) / max<uint32_t>(1, loopMs / frameCount));
+    if (frameIndex >= frameCount) frameIndex = frameCount - 1;
+    int x = kActivePetRegionX + (kActivePetRegionWidth - activePetDisplay.frameWidth) / 2;
+    int y = kActivePetRegionY + (kActivePetRegionHeight - activePetDisplay.frameHeight) / 2;
+    blitRgb565SpriteFrame(x, y, activePetDisplay.spritePixels, activePetDisplay.frameWidth,
+                          activePetDisplay.frameHeight, activePetDisplay.spriteStripWidth, frameIndex);
+  }
+}
+
 bool lcdFlush() {
   if (!lcdBuffer) return false;
   lcdSetWindow(0, 0, kLcdWidth, kLcdHeight);
@@ -667,8 +739,12 @@ void drawLcdFrame() {
   lcdDrawText(6, 6, F("HSTUDIO"), 2, kColorFg);
   drawWifiGlyph(196, 4, kColorFg);
   lcdDrawHLine(0, 28, kLcdWidth, kColorMuted);
-  drawEye(40, 60, blink, thinking, error);
-  drawEye(144, 60, blink, thinking, error);
+  if (!thinking && !error && activePetDisplay.available) {
+    drawActivePetFrame();
+  } else {
+    drawEye(40, 60, blink, thinking, error);
+    drawEye(144, 60, blink, thinking, error);
+  }
   if (thinking) {
     uint8_t phase = static_cast<uint8_t>((millis() / 180) % 4);
     for (uint8_t i = 0; i < 3; ++i) {
@@ -2252,6 +2328,7 @@ bool runMcuLogin(LanDevice &device, const String &account, const String &passwor
     prefs.end();
     parseLoginProfiles(response);
     connectMcuSocketClient();
+    clearActivePetDisplay();
     setLcdStatus(LcdMode::Ready, F("LOGIN"), F("OK"), 100);
   } else {
     clearLoginProfiles();
@@ -2288,6 +2365,7 @@ bool autoLoginDevice(LanDevice &device) {
     pendingProfileDeviceKey = key;
     activeDeviceKey = key;
     activeDeviceUrl = device.url;
+    clearActivePetDisplay();
   }
   return ok;
 }
@@ -2431,6 +2509,7 @@ void saveProfile() {
         lanDevices[i].profile = selectedProfile;
         lanDevices[i].loggedIn = true;
         connectMcuSocketClient();
+        clearActivePetDisplay();
         break;
       }
     }
@@ -2482,6 +2561,8 @@ void setActiveDevice() {
     return;
   }
 
+  clearActivePetDisplay();
+
   server.sendHeader(F("Location"), F("/device"), true);
   server.send(302, F("text/plain"), F(""));
 }
@@ -2506,6 +2587,7 @@ void logoutDevice() {
   prefs.end();
   if (lastKey.length() == 0) selectedProfile = "";
   connectMcuSocketClient();
+  clearActivePetDisplay();
   server.sendHeader(F("Location"), F("/device"), true);
   server.send(302, F("text/plain"), F(""));
 }
@@ -3389,6 +3471,180 @@ String activeDeviceEndpoint(const char *path) {
   if (endpoint.length() == 0) return "";
   endpoint += path;
   return endpoint;
+}
+
+void clearActivePetDisplay() {
+  if (activePetDisplay.spritePixels) {
+    free(activePetDisplay.spritePixels);
+    activePetDisplay.spritePixels = nullptr;
+  }
+  activePetDisplay = ActivePetDisplay();
+}
+
+bool refreshActivePetDisplay(bool force) {
+  uint32_t now = millis();
+  if (!force && activePetDisplay.lastRefreshedAtMs > 0 && now < activePetDisplay.lastRefreshedAtMs) {
+    return activePetDisplay.available;
+  }
+  if (!force && activePetDisplay.lastRefreshedAtMs > 0 && now - activePetDisplay.lastRefreshedAtMs < kActivePetRefreshIntervalMs) {
+    if (activePetDisplay.available && (!activePetDisplay.spritePixels || activePetDisplay.loadedSpriteRevision != activePetDisplay.spritesheetRevision)) {
+      refreshActivePetSprite(false);
+    }
+    return activePetDisplay.available;
+  }
+  if (!wifiReady || WiFi.status() != WL_CONNECTED || activeDeviceUrl.length() == 0 || mcuAuthToken.length() == 0 || selectedProfile.length() == 0) {
+    clearActivePetDisplay();
+    activePetDisplay.lastRefreshedAtMs = now;
+    return false;
+  }
+
+  String endpoint = activeDeviceEndpoint(F("/api/hermes/pets/active"));
+  if (endpoint.length() == 0) return false;
+
+  HTTPClient http;
+  http.setTimeout(12000);
+  if (!http.begin(endpoint)) {
+    activePetDisplay.lastRefreshedAtMs = now;
+    return false;
+  }
+  http.addHeader(F("Authorization"), String(F("Bearer ")) + mcuAuthToken);
+  http.addHeader(F("X-Hermes-Profile"), selectedProfile);
+
+  int code = http.GET();
+  String body = http.getString();
+  http.end();
+
+  activePetDisplay.lastRefreshedAtMs = now;
+  if (code < 200 || code >= 300) {
+    return false;
+  }
+
+  if (body.indexOf(F("\"pet\":null")) >= 0) {
+    clearActivePetDisplay();
+    return true;
+  }
+
+  String petJson = jsonObjectValue(body, F("pet"));
+  String slug = jsonStringValue(petJson, F("slug"));
+  if (petJson.length() == 0 || slug.length() == 0) {
+    clearActivePetDisplay();
+    return false;
+  }
+
+  bool changed = !activePetDisplay.available || activePetDisplay.slug != slug;
+
+  activePetDisplay.available = true;
+  activePetDisplay.slug = slug;
+  activePetDisplay.displayName = jsonStringValue(petJson, F("displayName"));
+  if (activePetDisplay.displayName.length() == 0) activePetDisplay.displayName = slug;
+  activePetDisplay.kind = jsonStringValue(petJson, F("kind"));
+  activePetDisplay.submittedBy = jsonStringValue(petJson, F("submittedBy"));
+  activePetDisplay.frameCount = static_cast<uint8_t>(max(1, jsonIntValue(petJson, F("framesPerState"))));
+  activePetDisplay.loopMs = static_cast<uint32_t>(max(1, jsonIntValue(petJson, F("loopMs"))));
+  activePetDisplay.spritesheetRevision = static_cast<uint32_t>(jsonIntValue(petJson, F("spritesheetRevision")));
+  lcdDirty = true;
+  refreshActivePetSprite(changed);
+  return true;
+}
+
+bool refreshActivePetSprite(bool force) {
+  uint32_t now = millis();
+  if (!activePetDisplay.available) return false;
+  if (!force && activePetDisplay.spritePixels && activePetDisplay.loadedSpriteRevision == activePetDisplay.spritesheetRevision &&
+      now - activePetDisplay.lastSpriteRefreshAtMs < kActivePetRefreshIntervalMs) {
+    return true;
+  }
+  if (!force && activePetDisplay.lastSpriteRefreshAtMs > 0 &&
+      now - activePetDisplay.lastSpriteRefreshAtMs < kActivePetRetryMs &&
+      activePetDisplay.loadedSpriteRevision != activePetDisplay.spritesheetRevision) {
+    return false;
+  }
+
+  String endpoint = activeDeviceEndpoint(F("/api/hermes/pets/active-sprite"));
+  if (endpoint.length() == 0) return false;
+
+  HTTPClient http;
+  http.setTimeout(12000);
+  if (!http.begin(endpoint)) {
+    activePetDisplay.lastSpriteRefreshAtMs = now;
+    return false;
+  }
+  http.addHeader(F("Authorization"), String(F("Bearer ")) + mcuAuthToken);
+  http.addHeader(F("X-Hermes-Profile"), selectedProfile);
+
+  int code = http.GET();
+  if (code < 200 || code >= 300) {
+    Serial.printf("Active pet sprite HTTP %d profile=%s\n", code, selectedProfile.c_str());
+    http.end();
+    activePetDisplay.lastSpriteRefreshAtMs = now;
+    if (code == 404) {
+      if (activePetDisplay.spritePixels) {
+        free(activePetDisplay.spritePixels);
+        activePetDisplay.spritePixels = nullptr;
+      }
+      activePetDisplay.frameWidth = 0;
+      activePetDisplay.frameHeight = 0;
+      activePetDisplay.spriteStripWidth = 0;
+      activePetDisplay.loadedSpriteRevision = 0;
+    }
+    return false;
+  }
+
+  uint16_t frameWidth = kActivePetRegionWidth;
+  uint16_t frameHeight = kActivePetRegionHeight;
+  uint16_t frameCount = max<uint16_t>(activePetDisplay.frameCount, 1);
+  uint16_t width = static_cast<uint16_t>(frameWidth * frameCount);
+  uint16_t height = frameHeight;
+  size_t expectedBytes = static_cast<size_t>(width) * height * sizeof(uint16_t);
+  int contentLength = http.getSize();
+  if (contentLength > 0 && static_cast<size_t>(contentLength) != expectedBytes) {
+    Serial.printf("Active pet sprite size mismatch expected=%u got=%d\n", static_cast<unsigned>(expectedBytes), contentLength);
+    http.end();
+    activePetDisplay.lastSpriteRefreshAtMs = now;
+    return false;
+  }
+
+  uint16_t *pixels = static_cast<uint16_t *>(ps_malloc(expectedBytes));
+  if (!pixels) {
+    http.end();
+    activePetDisplay.lastSpriteRefreshAtMs = now;
+    return false;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+  size_t readBytesTotal = 0;
+  while (readBytesTotal < expectedBytes) {
+    int available = stream->available();
+    if (available <= 0) {
+      if (!stream->connected()) break;
+      delay(2);
+      yield();
+      continue;
+    }
+    size_t toRead = min(static_cast<size_t>(available), expectedBytes - readBytesTotal);
+    int bytesRead = stream->readBytes(reinterpret_cast<uint8_t *>(pixels) + readBytesTotal, toRead);
+    if (bytesRead <= 0) break;
+    readBytesTotal += static_cast<size_t>(bytesRead);
+  }
+  http.end();
+
+  if (readBytesTotal != expectedBytes) {
+    Serial.printf("Active pet sprite incomplete expected=%u got=%u\n",
+                  static_cast<unsigned>(expectedBytes), static_cast<unsigned>(readBytesTotal));
+    free(pixels);
+    activePetDisplay.lastSpriteRefreshAtMs = now;
+    return false;
+  }
+
+  if (activePetDisplay.spritePixels) free(activePetDisplay.spritePixels);
+  activePetDisplay.spritePixels = pixels;
+  activePetDisplay.frameWidth = frameWidth;
+  activePetDisplay.frameHeight = frameHeight;
+  activePetDisplay.spriteStripWidth = width;
+  activePetDisplay.loadedSpriteRevision = activePetDisplay.spritesheetRevision;
+  activePetDisplay.lastSpriteRefreshAtMs = now;
+  lcdDirty = true;
+  return true;
 }
 
 bool downloadAndApplyMcuFirmware(const String &url, const String &md5, int expectedSize) {
@@ -4540,6 +4796,7 @@ void loop() {
   server.handleClient();
   if (wsReady) mcuSocketLoop();
   tickMcuInteraction();
+  refreshActivePetDisplay();
   refreshLcd();
   handleBootButton();
   tickStatusLed();

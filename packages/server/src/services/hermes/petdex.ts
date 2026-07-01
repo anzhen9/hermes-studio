@@ -18,6 +18,8 @@ export interface PetdexManifest {
 const PETDEX_MANIFEST_URL = 'https://assets.petdex.dev/manifests/petdex-v1.json'
 const CACHE_TTL_MS = 5 * 60 * 1000
 const FETCH_TIMEOUT_MS = 15_000
+const FETCH_RETRY_COUNT = 3
+const FETCH_RETRY_DELAY_MS = 250
 const MAX_ASSET_BYTES = 10 * 1024 * 1024
 
 let cache: { expiresAt: number; manifest: PetdexManifest } | null = null
@@ -63,6 +65,25 @@ function imageMimeFromResponse(response: Response, pathname: string): string {
   return 'application/octet-stream'
 }
 
+function isTransientPetdexError(error: unknown): boolean {
+  const cause = error && typeof error === 'object' ? (error as { cause?: unknown }).cause : undefined
+  const code = [error, cause]
+    .map(value => value && typeof value === 'object' ? String((value as { code?: unknown }).code || '').trim().toUpperCase() : '')
+    .find(Boolean) || ''
+  if (['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN', 'UND_ERR_SOCKET'].includes(code)) {
+    return true
+  }
+  const message = [error, cause]
+    .map(value => value instanceof Error ? value.message : String(value || ''))
+    .join(' ')
+    .toLowerCase()
+  return /econnreset|timed out|timeout|fetch failed|socket|network|eai_again|connection reset/.test(message)
+}
+
+async function waitForRetry(attempt: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, FETCH_RETRY_DELAY_MS * attempt))
+}
+
 function normalizeManifest(value: unknown): PetdexManifest {
   if (!value || typeof value !== 'object') {
     throw new Error('petdex manifest is not an object')
@@ -87,51 +108,77 @@ export async function fetchPetdexManifest(options: { force?: boolean } = {}): Pr
     return cache.manifest
   }
 
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-  try {
-    const response = await fetch(PETDEX_MANIFEST_URL, {
-      headers: { 'User-Agent': 'hermes-web-ui-petdex' },
-      signal: controller.signal,
-    })
-    if (!response.ok) {
-      throw new Error(`petdex manifest request failed: ${response.status}`)
+  let lastError: unknown = null
+  for (let attempt = 1; attempt <= FETCH_RETRY_COUNT; attempt += 1) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    try {
+      const response = await fetch(PETDEX_MANIFEST_URL, {
+        headers: {
+          'User-Agent': 'hermes-web-ui-petdex',
+          Connection: 'close',
+        },
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        throw new Error(`petdex manifest request failed: ${response.status}`)
+      }
+      const manifest = normalizeManifest(await response.json())
+      cache = { expiresAt: now + CACHE_TTL_MS, manifest }
+      return manifest
+    } catch (error) {
+      lastError = error
+      if (attempt >= FETCH_RETRY_COUNT || !isTransientPetdexError(error)) {
+        throw error
+      }
+      await waitForRetry(attempt)
+    } finally {
+      clearTimeout(timeout)
     }
-    const manifest = normalizeManifest(await response.json())
-    cache = { expiresAt: now + CACHE_TTL_MS, manifest }
-    return manifest
-  } finally {
-    clearTimeout(timeout)
   }
+  throw lastError instanceof Error ? lastError : new Error('petdex manifest request failed')
 }
 
 export async function fetchPetdexAsset(urlValue: string): Promise<{ buffer: Buffer; mime: string; maxAgeSeconds: number }> {
   const url = assertPetdexAssetUrl(urlValue)
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-  try {
-    const response = await fetch(url, {
-      headers: { 'User-Agent': 'hermes-web-ui-petdex' },
-      signal: controller.signal,
-    })
-    if (!response.ok) throw new Error(`petdex asset request failed: ${response.status}`)
+  let lastError: unknown = null
+  for (let attempt = 1; attempt <= FETCH_RETRY_COUNT; attempt += 1) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'hermes-web-ui-petdex',
+          Connection: 'close',
+        },
+        signal: controller.signal,
+      })
+      if (!response.ok) throw new Error(`petdex asset request failed: ${response.status}`)
 
-    const length = Number(response.headers.get('content-length') || '0')
-    if (Number.isFinite(length) && length > MAX_ASSET_BYTES) {
-      throw new Error('petdex asset is too large')
-    }
+      const length = Number(response.headers.get('content-length') || '0')
+      if (Number.isFinite(length) && length > MAX_ASSET_BYTES) {
+        throw new Error('petdex asset is too large')
+      }
 
-    const arrayBuffer = await response.arrayBuffer()
-    if (arrayBuffer.byteLength > MAX_ASSET_BYTES) {
-      throw new Error('petdex asset is too large')
-    }
+      const arrayBuffer = await response.arrayBuffer()
+      if (arrayBuffer.byteLength > MAX_ASSET_BYTES) {
+        throw new Error('petdex asset is too large')
+      }
 
-    return {
-      buffer: Buffer.from(arrayBuffer),
-      mime: imageMimeFromResponse(response, url.pathname),
-      maxAgeSeconds: 60 * 60,
+      return {
+        buffer: Buffer.from(arrayBuffer),
+        mime: imageMimeFromResponse(response, url.pathname),
+        maxAgeSeconds: 60 * 60,
+      }
+    } catch (error) {
+      lastError = error
+      if (attempt >= FETCH_RETRY_COUNT || !isTransientPetdexError(error)) {
+        throw error
+      }
+      await waitForRetry(attempt)
+    } finally {
+      clearTimeout(timeout)
     }
-  } finally {
-    clearTimeout(timeout)
   }
+  throw lastError instanceof Error ? lastError : new Error('petdex asset request failed')
 }

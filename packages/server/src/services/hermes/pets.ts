@@ -1,7 +1,10 @@
 import { existsSync } from 'fs'
 import { mkdir, readFile, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
+import { createRequire } from 'node:module'
+import type { OverlayOptions } from 'sharp'
 import { getWebUiHome } from '../../config'
+import { logger } from '../logger'
 import { fetchPetdexManifest, type PetdexPet } from './petdex'
 
 export type ActivePetState = 'idle' | 'run' | 'review' | 'failed' | 'wave' | 'jump' | 'waiting'
@@ -57,6 +60,32 @@ export interface ActivePetResponse {
   updatedAt: number
 }
 
+export interface ActivePetSpriteResponse {
+  buffer: Buffer
+  width: number
+  height: number
+  frameWidth: number
+  frameHeight: number
+  frameCount: number
+  loopMs: number
+}
+
+export class PetAdoptionError extends Error {
+  slug: string
+  profile: string
+  stage: 'manifest' | 'spritesheet' | 'petjson' | 'install'
+  assetUrl: string
+
+  constructor(input: { slug: string; profile: string; stage: 'manifest' | 'spritesheet' | 'petjson' | 'install'; assetUrl: string; message: string }) {
+    super(input.message)
+    this.name = 'PetAdoptionError'
+    this.slug = input.slug
+    this.profile = input.profile
+    this.stage = input.stage
+    this.assetUrl = input.assetUrl
+  }
+}
+
 const FRAME_W = 192
 const FRAME_H = 208
 const FRAMES_PER_STATE = 6
@@ -77,6 +106,25 @@ const STATE_ROWS = [
 const MAX_SPRITESHEET_BYTES = 10 * 1024 * 1024
 const MAX_JSON_BYTES = 512 * 1024
 const FETCH_TIMEOUT_MS = 20_000
+const FETCH_RETRY_COUNT = 3
+const FETCH_RETRY_DELAY_MS = 250
+const ACTIVE_PET_SPRITE_WIDTH = 192
+const ACTIVE_PET_SPRITE_HEIGHT = 136
+
+type SharpModule = typeof import('sharp')
+
+let sharpLoader: Promise<SharpModule> | null = null
+
+async function loadSharp(): Promise<SharpModule> {
+  if (!sharpLoader) {
+    sharpLoader = Promise.resolve().then(() => {
+      const runtimeRequire = createRequire(join(process.cwd(), 'package.json'))
+      const mod = runtimeRequire('sharp') as typeof import('sharp')
+      return mod as SharpModule
+    })
+  }
+  return sharpLoader
+}
 
 function profileMetadataRoot(): string {
   return join(getWebUiHome(), 'profile-metadata')
@@ -103,6 +151,14 @@ function petMetaPath(profile: string, slug: string): string {
   return join(petDir(profile, slug), 'pet.json')
 }
 
+function sparkbotSpriteCachePath(profile: string, slug: string): string {
+  return join(petDir(profile, slug), 'sparkbot-idle.rgb565')
+}
+
+function sparkbotSpriteCacheMetaPath(profile: string, slug: string): string {
+  return join(petDir(profile, slug), 'sparkbot-idle.json')
+}
+
 function safeSlug(slug: string): string {
   const normalized = String(slug || '').trim().toLowerCase()
   const safe = normalized.replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
@@ -127,34 +183,69 @@ function mimeFromResponse(response: Response, fallbackUrl: string): string {
   return 'application/octet-stream'
 }
 
+function isTransientPetAssetError(error: unknown): boolean {
+  const cause = error && typeof error === 'object' ? (error as { cause?: unknown }).cause : undefined
+  const code = [error, cause]
+    .map(value => value && typeof value === 'object' ? String((value as { code?: unknown }).code || '').trim().toUpperCase() : '')
+    .find(Boolean) || ''
+  if (['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN', 'UND_ERR_SOCKET'].includes(code)) {
+    return true
+  }
+
+  const message = [error, cause]
+    .map(value => value instanceof Error ? value.message : String(value || ''))
+    .join(' ')
+    .toLowerCase()
+  return /econnreset|timed out|timeout|fetch failed|socket|network|eai_again|connection reset/.test(message)
+}
+
+async function waitForRetry(attempt: number): Promise<void> {
+  const delayMs = FETCH_RETRY_DELAY_MS * attempt
+  await new Promise(resolve => setTimeout(resolve, delayMs))
+}
+
 async function fetchBytes(urlValue: string, maxBytes: number): Promise<{ buffer: Buffer; mime: string }> {
   const url = assertPetdexAssetUrl(urlValue)
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-  try {
-    const response = await fetch(url, {
-      headers: { 'User-Agent': 'hermes-web-ui-pets' },
-      signal: controller.signal,
-    })
-    if (!response.ok) throw new Error(`Pet asset request failed: ${response.status}`)
+  let lastError: unknown = null
+  for (let attempt = 1; attempt <= FETCH_RETRY_COUNT; attempt += 1) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'hermes-web-ui-pets',
+          Connection: 'close',
+        },
+        signal: controller.signal,
+      })
+      if (!response.ok) throw new Error(`Pet asset request failed: ${response.status}`)
 
-    const length = Number(response.headers.get('content-length') || '0')
-    if (Number.isFinite(length) && length > maxBytes) {
-      throw new Error('Pet asset is too large')
-    }
+      const length = Number(response.headers.get('content-length') || '0')
+      if (Number.isFinite(length) && length > maxBytes) {
+        throw new Error('Pet asset is too large')
+      }
 
-    const arrayBuffer = await response.arrayBuffer()
-    if (arrayBuffer.byteLength > maxBytes) {
-      throw new Error('Pet asset is too large')
-    }
+      const arrayBuffer = await response.arrayBuffer()
+      if (arrayBuffer.byteLength > maxBytes) {
+        throw new Error('Pet asset is too large')
+      }
 
-    return {
-      buffer: Buffer.from(arrayBuffer),
-      mime: mimeFromResponse(response, url.pathname.toLowerCase()),
+      return {
+        buffer: Buffer.from(arrayBuffer),
+        mime: mimeFromResponse(response, url.pathname.toLowerCase()),
+      }
+    } catch (error) {
+      lastError = error
+      if (attempt >= FETCH_RETRY_COUNT || !isTransientPetAssetError(error)) {
+        throw error
+      }
+      logger.warn({ err: error, url: url.toString(), attempt, maxAttempts: FETCH_RETRY_COUNT }, '[pets] transient asset fetch failed, retrying')
+      await waitForRetry(attempt)
+    } finally {
+      clearTimeout(timeout)
     }
-  } finally {
-    clearTimeout(timeout)
   }
+  throw lastError instanceof Error ? lastError : new Error('Pet asset request failed')
 }
 
 async function fetchTextAsset(urlValue: string, maxBytes: number): Promise<string | null> {
@@ -203,12 +294,24 @@ export async function adoptPetFromPetdex(profile: string, slugInput: string): Pr
   const targetDir = petDir(profile, pet.slug)
   await mkdir(targetDir, { recursive: true })
 
-  const spritesheet = await fetchBytes(pet.spritesheetUrl, MAX_SPRITESHEET_BYTES)
+  const spritesheet = await fetchBytes(pet.spritesheetUrl, MAX_SPRITESHEET_BYTES).catch((error) => {
+    throw new PetAdoptionError({
+      slug: pet.slug,
+      profile,
+      stage: 'spritesheet',
+      assetUrl: pet.spritesheetUrl,
+      message: error instanceof Error ? error.message : 'Pet spritesheet download failed',
+    })
+  })
   await writeFile(join(targetDir, 'spritesheet.webp'), spritesheet.buffer, { mode: 0o600 })
 
   if (pet.petJsonUrl) {
-    const petJson = await fetchTextAsset(pet.petJsonUrl, MAX_JSON_BYTES)
-    if (petJson) await writeFile(join(targetDir, 'petdex-pet.json'), petJson, { encoding: 'utf-8', mode: 0o600 })
+    try {
+      const petJson = await fetchTextAsset(pet.petJsonUrl, MAX_JSON_BYTES)
+      if (petJson) await writeFile(join(targetDir, 'petdex-pet.json'), petJson, { encoding: 'utf-8', mode: 0o600 })
+    } catch (error) {
+      logger.warn({ err: error, slug: pet.slug, url: pet.petJsonUrl }, '[pets] optional pet metadata download failed')
+    }
   }
 
   const now = Date.now()
@@ -222,8 +325,23 @@ export async function adoptPetFromPetdex(profile: string, slugInput: string): Pr
 
   await writeJsonFile(petMetaPath(profile, pet.slug), installed)
   await writeJsonFile(activePetPath(profile), active)
+
+  try {
+    await getActivePetSprite(profile)
+  } catch (err) {
+    logger.warn({ err, profile, slug: pet.slug }, '[pets] pre-generating sparkbot sprite cache failed')
+  }
+
   const response = await buildActivePetResponse(profile, installed, active)
-  if (!response) throw new Error('Installed pet asset is missing')
+  if (!response) {
+    throw new PetAdoptionError({
+      slug: pet.slug,
+      profile,
+      stage: 'install',
+      assetUrl: pet.spritesheetUrl,
+      message: 'Installed pet asset is missing',
+    })
+  }
   return response
 }
 
@@ -301,5 +419,136 @@ async function buildActivePetResponse(
     installedAt: installed.installedAt,
     spritesheetRevision,
     updatedAt,
+  }
+}
+
+function rgb888ToRgb565(r: number, g: number, b: number): number {
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+}
+
+function rgbaToRgb565(buffer: Buffer, channels: number): Buffer {
+  const pixelCount = Math.floor(buffer.length / channels)
+  const output = Buffer.alloc(pixelCount * 2)
+  for (let pixel = 0, offset = 0; pixel < pixelCount; pixel += 1, offset += channels) {
+    const value = rgb888ToRgb565(buffer[offset], buffer[offset + 1], buffer[offset + 2])
+    output.writeUInt16LE(value, pixel * 2)
+  }
+  return output
+}
+
+async function readCachedSparkbotSprite(profile: string, installed: InstalledPet): Promise<ActivePetSpriteResponse | null> {
+  const cachePath = sparkbotSpriteCachePath(profile, installed.slug)
+  const metaPath = sparkbotSpriteCacheMetaPath(profile, installed.slug)
+  if (!existsSync(cachePath) || !existsSync(metaPath)) return null
+
+  const meta = await readJsonFile<{
+    spritesheetRevision?: number
+    width?: number
+    height?: number
+    frameWidth?: number
+    frameHeight?: number
+    frameCount?: number
+    loopMs?: number
+  }>(metaPath)
+  const spritesheetRevision = installed.updatedAt || installed.installedAt || 0
+  if (!meta || meta.spritesheetRevision !== spritesheetRevision) return null
+
+  const buffer = await readFile(cachePath)
+  return {
+    buffer,
+    width: meta.width || ACTIVE_PET_SPRITE_WIDTH * FRAMES_PER_STATE,
+    height: meta.height || ACTIVE_PET_SPRITE_HEIGHT,
+    frameWidth: meta.frameWidth || ACTIVE_PET_SPRITE_WIDTH,
+    frameHeight: meta.frameHeight || ACTIVE_PET_SPRITE_HEIGHT,
+    frameCount: meta.frameCount || FRAMES_PER_STATE,
+    loopMs: meta.loopMs || LOOP_MS,
+  }
+}
+
+async function writeCachedSparkbotSprite(
+  profile: string,
+  installed: InstalledPet,
+  sprite: ActivePetSpriteResponse,
+): Promise<void> {
+  const spritesheetRevision = installed.updatedAt || installed.installedAt || 0
+  await writeFile(sparkbotSpriteCachePath(profile, installed.slug), sprite.buffer, { mode: 0o600 })
+  await writeJsonFile(sparkbotSpriteCacheMetaPath(profile, installed.slug), {
+    spritesheetRevision,
+    width: sprite.width,
+    height: sprite.height,
+    frameWidth: sprite.frameWidth,
+    frameHeight: sprite.frameHeight,
+    frameCount: sprite.frameCount,
+    loopMs: sprite.loopMs,
+  })
+}
+
+export async function getActivePetSprite(profile: string): Promise<ActivePetSpriteResponse | null> {
+  const active = await readJsonFile<ActivePetConfig>(activePetPath(profile))
+  if (!active?.enabled || !active.slug) return null
+
+  const installed = await readJsonFile<InstalledPet>(petMetaPath(profile, active.slug))
+  if (!installed) return null
+
+  const cached = await readCachedSparkbotSprite(profile, installed)
+  if (cached) return cached
+
+  const filePath = join(petDir(profile, installed.slug), installed.spritesheetFile || 'spritesheet.webp')
+  if (!existsSync(filePath)) return null
+
+  try {
+    const source = await readFile(filePath)
+    const sharp = await loadSharp()
+    const metadata = await sharp(source).metadata()
+    const frameCount = FRAMES_PER_STATE
+    const composite: OverlayOptions[] = []
+
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      const baseFrame = sharp(source)
+      const framePipeline = metadata.width && metadata.height && metadata.width >= FRAME_W * frameCount && metadata.height >= FRAME_H
+        ? baseFrame.extract({ left: frameIndex * FRAME_W, top: 0, width: FRAME_W, height: FRAME_H })
+        : metadata.width && metadata.height && metadata.width >= FRAME_W && metadata.height >= FRAME_H
+          ? baseFrame.extract({ left: 0, top: 0, width: FRAME_W, height: FRAME_H })
+          : baseFrame
+
+      const frame = await framePipeline
+        .resize(ACTIVE_PET_SPRITE_WIDTH, ACTIVE_PET_SPRITE_HEIGHT, {
+          fit: 'contain',
+          background: { r: 0, g: 0, b: 0, alpha: 1 },
+        })
+        .flatten({ background: { r: 0, g: 0, b: 0 } })
+        .removeAlpha()
+        .png()
+        .toBuffer()
+
+      composite.push({ input: frame, left: frameIndex * ACTIVE_PET_SPRITE_WIDTH, top: 0 })
+    }
+
+    const { data, info } = await sharp({
+      create: {
+        width: ACTIVE_PET_SPRITE_WIDTH * frameCount,
+        height: ACTIVE_PET_SPRITE_HEIGHT,
+        channels: 3,
+        background: { r: 0, g: 0, b: 0 },
+      },
+    })
+      .composite(composite)
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+
+    const sprite = {
+      buffer: rgbaToRgb565(data, info.channels),
+      width: info.width,
+      height: info.height,
+      frameWidth: ACTIVE_PET_SPRITE_WIDTH,
+      frameHeight: ACTIVE_PET_SPRITE_HEIGHT,
+      frameCount,
+      loopMs: LOOP_MS,
+    }
+    await writeCachedSparkbotSprite(profile, installed, sprite)
+    return sprite
+  } catch (err) {
+    logger.warn({ err, profile, slug: installed.slug, path: filePath }, '[pets] sparkbot sprite generation failed')
+    return null
   }
 }
