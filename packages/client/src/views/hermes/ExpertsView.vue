@@ -5,6 +5,8 @@ import { useI18n } from 'vue-i18n'
 import { NButton, NEmpty, NInput, NModal, useMessage } from 'naive-ui'
 import { useChatStore } from '@/stores/hermes/chat'
 import agentsIndex from '@/data/experts-index.json'
+import PageSidebarNav from '@/components/layout/PageSidebarNav.vue'
+import PageSidebarFooter from '@/components/layout/PageSidebarFooter.vue'
 
 interface ExpertAgent {
   id: string
@@ -63,6 +65,10 @@ function openAgent(agent: ExpertAgent) {
   showModal.value = true
 }
 
+function openNewChatPage() {
+  void router.push({ name: 'hermes.chat' })
+}
+
 function closeModal() {
   showModal.value = false
   selectedAgent.value = null
@@ -117,58 +123,72 @@ async function startChat(agent: ExpertAgent, initialQuestion?: string) {
 </script>
 
 <template>
-  <div class="experts-view">
-    <header class="page-header">
-      <div class="header-main">
-        <h2 class="header-title">{{ t('experts.title') }}</h2>
-        <span class="header-subtitle">{{ t('experts.total', { count: totalCount }) }}</span>
+  <div class="experts-panel">
+    <aside class="session-list">
+      <div class="page-sidebar-top">
+        <PageSidebarNav
+          active="experts"
+          :primary-label="t('chat.newChat')"
+          hide-mode-switch
+          @primary="openNewChatPage"
+        />
       </div>
-    </header>
+      <PageSidebarFooter />
+    </aside>
 
-    <div class="experts-content">
-      <NInput
-        v-model:value="searchQuery"
-        :placeholder="t('experts.searchPlaceholder')"
-        clearable
-        class="search-input"
-      />
+    <div class="experts-view">
+      <header class="page-header">
+        <div class="header-main">
+          <h2 class="header-title">{{ t('experts.title') }}</h2>
+          <span class="header-subtitle">{{ t('experts.total', { count: totalCount }) }}</span>
+        </div>
+      </header>
 
-      <div v-if="filteredDepartments.length" class="departments">
-        <section
-          v-for="dept in filteredDepartments"
-          :key="dept.key"
-          class="department-section"
-        >
-          <div class="department-header">
-            <h3 class="department-name">{{ dept.name }}</h3>
-            <span class="department-count">
-              {{ t('experts.agentCount', { count: dept.agents.length }) }}
-            </span>
-          </div>
+      <div class="experts-content">
+        <NInput
+          v-model:value="searchQuery"
+          :placeholder="t('experts.searchPlaceholder')"
+          clearable
+          class="search-input"
+        />
 
-          <div class="agent-grid">
-            <article
-              v-for="agent in dept.agents"
-              :key="agent.id"
-              class="agent-card"
-              :class="{ loading: loadingAgentId === agent.id }"
-              role="button"
-              tabindex="0"
-              @click="openAgent(agent)"
-              @keydown.enter.prevent="openAgent(agent)"
-              @keydown.space.prevent="openAgent(agent)"
-            >
-              <div class="agent-name">
-                <span v-if="agent.emoji" class="agent-emoji" aria-hidden="true">{{ agent.emoji }}</span>
-                <span>{{ agent.name }}</span>
-              </div>
-              <p class="agent-description">{{ agent.description }}</p>
-            </article>
-          </div>
-        </section>
+        <div v-if="filteredDepartments.length" class="departments">
+          <section
+            v-for="dept in filteredDepartments"
+            :key="dept.key"
+            class="department-section"
+          >
+            <div class="department-header">
+              <h3 class="department-name">{{ dept.name }}</h3>
+              <span class="department-count">
+                {{ t('experts.agentCount', { count: dept.agents.length }) }}
+              </span>
+            </div>
+
+            <div class="agent-grid">
+              <article
+                v-for="agent in dept.agents"
+                :key="agent.id"
+                class="agent-card"
+                :class="{ loading: loadingAgentId === agent.id }"
+                role="button"
+                tabindex="0"
+                @click="openAgent(agent)"
+                @keydown.enter.prevent="openAgent(agent)"
+                @keydown.space.prevent="openAgent(agent)"
+              >
+                <div class="agent-name">
+                  <span v-if="agent.emoji" class="agent-emoji" aria-hidden="true">{{ agent.emoji }}</span>
+                  <span>{{ agent.name }}</span>
+                </div>
+                <p class="agent-description">{{ agent.description }}</p>
+              </article>
+            </div>
+          </section>
+        </div>
+
+        <NEmpty v-else :description="t('experts.noMatch')" />
       </div>
-
-      <NEmpty v-else :description="t('experts.noMatch')" />
     </div>
 
     <NModal
@@ -219,10 +239,44 @@ async function startChat(agent: ExpertAgent, initialQuestion?: string) {
 <style scoped lang="scss">
 @use "@/styles/variables" as *;
 
+.experts-panel {
+  display: flex;
+  height: 100%;
+  position: relative;
+}
+
+.session-list {
+  width: $sidebar-width;
+  border-right: 1px solid $border-color;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+
+  @media (max-width: $breakpoint-mobile) {
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 100%;
+    z-index: 120;
+    background: $bg-card;
+    box-shadow: 2px 0 8px rgba(0, 0, 0, 0.1);
+  }
+}
+
+.page-sidebar-top {
+  flex-shrink: 0;
+  padding: 12px;
+  border-bottom: 1px solid $border-color;
+}
+
 .experts-view {
+  flex: 1;
   height: calc(100 * var(--vh));
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .page-header {

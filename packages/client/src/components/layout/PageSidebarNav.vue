@@ -5,7 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useSessionSearch } from '@/composables/useSessionSearch'
 
-type ActiveSection = 'chat' | 'history' | 'group' | 'global' | 'workflow'
+type ActiveSection = 'chat' | 'experts' | 'history' | 'group' | 'global' | 'workflow'
 
 const props = defineProps<{
   active: ActiveSection
@@ -50,6 +50,11 @@ function openWorkflow() {
   void router.push({ name: 'hermes.workflow' })
 }
 
+function openExperts() {
+  if (props.active === 'experts') return
+  void router.push({ name: 'hermes.experts' })
+}
+
 function openApiRelay() {
   if (typeof window === 'undefined') return
   window.open('https://apikey.fun/register?aff=LIBAPI', '_blank', 'noopener,noreferrer')
@@ -90,6 +95,24 @@ function openApiRelay() {
           <path d="m20 20-3.5-3.5" />
         </svg>
         <span>{{ t('sidebar.search') }}</span>
+      </button>
+      <button class="page-sidebar-tab" type="button" @click="openExperts">
+        <svg
+          width="15"
+          height="15"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+          <circle cx="9" cy="7" r="4" />
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+        </svg>
+        <span>{{ t('sidebar.experts') }}</span>
       </button>
       <button
         class="page-sidebar-tab"
