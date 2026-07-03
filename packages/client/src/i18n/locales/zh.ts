@@ -181,7 +181,6 @@ export default {
 
   sidebar: {
     chat: '对话',
-    experts: '专家',
     backToChat: '返回',
     search: '搜索',
     apiRelay: '饲料',
@@ -401,18 +400,6 @@ export default {
   drawer: {
     terminal: '终端',
     files: '工作区',
-  },
-
-  // 专家
-  experts: {
-    title: '专家',
-    total: '共 {count} 位',
-    agentCount: '{count} 个',
-    searchPlaceholder: '搜索专家...',
-    noMatch: '没有匹配的专家',
-    loadFailed: '启动专家会话失败',
-    sampleQuestions: '示例问题',
-    directChat: '直接对话',
   },
 
   // 对话
