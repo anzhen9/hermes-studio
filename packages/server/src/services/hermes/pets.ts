@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { createRequire } from 'node:module'
 import type { OverlayOptions } from 'sharp'
+import type sharpDefault from 'sharp'
 import { getWebUiHome } from '../../config'
 import { logger } from '../logger'
 import { getGlobalAgentServer } from '../global-agent/server'
@@ -114,7 +115,7 @@ const FETCH_RETRY_DELAY_MS = 250
 const ACTIVE_PET_SPRITE_WIDTH = 192
 const ACTIVE_PET_SPRITE_HEIGHT = 136
 
-type SharpModule = typeof import('sharp')
+type SharpModule = typeof sharpDefault
 
 let sharpLoader: Promise<SharpModule> | null = null
 
@@ -122,8 +123,7 @@ async function loadSharp(): Promise<SharpModule> {
   if (!sharpLoader) {
     sharpLoader = Promise.resolve().then(() => {
       const runtimeRequire = createRequire(join(process.cwd(), 'package.json'))
-      const mod = runtimeRequire('sharp') as typeof import('sharp')
-      return mod as SharpModule
+      return runtimeRequire('sharp') as SharpModule
     })
   }
   return sharpLoader
