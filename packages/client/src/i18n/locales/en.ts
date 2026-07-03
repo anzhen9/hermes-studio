@@ -181,6 +181,7 @@ export default {
   // Sidebar
   sidebar: {
     chat: 'Chat',
+    experts: 'Experts',
     backToChat: 'Back',
     search: 'Search',
     apiRelay: 'API Relay',
@@ -197,7 +198,6 @@ export default {
     logs: 'Logs',
     usage: 'Usage',
     performance: 'Performance',
-    journey: 'Journey',
     skillsUsage: 'Skills Usage',
     channels: 'Channels',
     gateways: 'Gateways',
@@ -396,38 +396,22 @@ export default {
     noActiveSessions: 'No active sessions',
   },
 
-  journey: {
-    title: 'Learning Journey',
-    play: 'Play journey',
-    pause: 'Pause journey',
-    refresh: 'Refresh',
-    loadFailed: 'Failed to load learning journey',
-    nodes: 'Nodes',
-    edges: 'Edges',
-    skills: 'Skills',
-    memories: 'Memories',
-    clusters: 'Clusters',
-    profile: 'Profile',
-    source: 'Source',
-    learnedSkills: 'Learned skills',
-    memorySkillEdges: 'Memory links',
-    allKinds: 'All kinds',
-    allCategories: 'All categories',
-    searchPlaceholder: 'Search nodes',
-    noClusters: 'No clusters',
-    noNodes: 'No journey nodes',
-    noCategory: 'Uncategorized',
-    category: 'Category',
-    useCount: 'Use count',
-    createdBy: 'Created by',
-    timestamp: 'Time',
-    pinned: 'Pinned',
-  },
-
   // Drawer
   drawer: {
     terminal: 'Terminal',
     files: 'Workspace',
+  },
+
+  // Experts
+  experts: {
+    title: 'Experts',
+    total: '{count} experts',
+    agentCount: '{count}',
+    searchPlaceholder: 'Search experts...',
+    noMatch: 'No matching experts',
+    loadFailed: 'Failed to start expert session',
+    sampleQuestions: 'Sample questions',
+    directChat: 'Start chat',
   },
 
   // Chat

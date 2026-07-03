@@ -31,6 +31,11 @@ const router = createRouter({
       component: () => import('@/views/hermes/HistoryView.vue'),
     },
     {
+      path: '/hermes/experts',
+      name: 'hermes.experts',
+      component: () => import('@/views/hermes/ExpertsView.vue'),
+    },
+    {
       path: '/hermes/global-agent',
       name: 'hermes.globalAgent',
       component: () => import('@/views/hermes/GlobalAgentView.vue'),
@@ -81,11 +86,6 @@ const router = createRouter({
       name: 'hermes.performance',
       component: () => import('@/views/hermes/PerformanceView.vue'),
       meta: { requiresSuperAdmin: true },
-    },
-    {
-      path: '/hermes/journey',
-      name: 'hermes.journey',
-      component: () => import('@/views/hermes/JourneyView.vue'),
     },
     {
       path: '/hermes/skills-usage',
