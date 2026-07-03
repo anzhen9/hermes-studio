@@ -52,6 +52,14 @@ cpSync(
   { recursive: true },
 )
 
+const agentsOutDir = resolve(rootDir, 'dist/agents')
+rmSync(agentsOutDir, { recursive: true, force: true })
+cpSync(
+  resolve(rootDir, 'packages/agents'),
+  agentsOutDir,
+  { recursive: true },
+)
+
 const firmwareBuildSrc = resolve(rootDir, 'packages/esp32-c3/.pio/build/esp32-c3-devkitm-1/firmware.bin')
 const firmwareReleaseSrc = resolve(rootDir, 'packages/esp32-c3/release/firmware.bin')
 const firmwareOutDir = resolve(rootDir, 'dist/mcu')

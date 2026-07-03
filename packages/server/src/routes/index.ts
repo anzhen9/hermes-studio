@@ -16,6 +16,7 @@ import { codexProxyRoutes } from './codex-proxy'
 import { sessionRoutes } from './hermes/sessions'
 import { profileRoutes } from './hermes/profiles'
 import { skillRoutes } from './hermes/skills'
+import { agentRoutes } from './hermes/agents'
 import { pluginRoutes } from './hermes/plugins'
 import { memoryRoutes } from './hermes/memory'
 import { modelRoutes } from './hermes/models'
@@ -42,7 +43,6 @@ import { mediaRoutes } from './hermes/media'
 import { groupChatRoutes, setGroupChatServer } from './hermes/group-chat'
 import { chatRunRoutes } from './hermes/chat-run'
 import { performanceMonitorRoutes } from './hermes/performance-monitor'
-import { journeyRoutes } from './hermes/journey'
 import { mcpRoutes } from './hermes/mcp'
 import { runtimeVersionRoutes } from './hermes/runtime-versions'
 import { writeGateRoutes } from './hermes/write-gate'
@@ -78,6 +78,7 @@ export function registerRoutes(app: any, authMiddleware: Array<(ctx: Context, ne
   app.use(sessionRoutes.routes())
   app.use(profileRoutes.routes())
   app.use(skillRoutes.routes())
+  app.use(agentRoutes.routes())
   app.use(pluginRoutes.routes())
   app.use(memoryRoutes.routes())
   app.use(modelRoutes.routes())
@@ -104,7 +105,6 @@ export function registerRoutes(app: any, authMiddleware: Array<(ctx: Context, ne
   app.use(mcuFirmwareRoutes.routes())
   app.use(mediaRoutes.routes())
   app.use(performanceMonitorRoutes.routes())
-  app.use(journeyRoutes.routes())
   app.use(mcpRoutes.routes())                   // MCP management
   app.use(runtimeVersionRoutes.routes())         // Runtime and version management
   app.use(writeGateRoutes.routes())              // Hermes Agent write approval review
