@@ -988,10 +988,9 @@ export const useChatStore = defineStore('chat', () => {
         if (prev?.contextTokens != null) s.contextTokens = prev.contextTokens
       }
       // Preserve a locally-created session that the backend hasn't persisted
-      // yet (e.g. an expert session created via startExpertChat). Without this,
-      // loadSessions would drop it from the list and the ChatView route guard
-      // would bounce away to hermes.chat because the route sessionId could no
-      // longer be found.
+      // yet. Without this, loadSessions would drop it from the list and the
+      // ChatView route guard would bounce away to hermes.chat because the
+      // route sessionId could no longer be found.
       if (preferredSessionId && !fresh.some(s => s.id === preferredSessionId)) {
         const local = sessions.value.find(s => s.id === preferredSessionId)
         if (local) fresh = [local, ...fresh]
@@ -3925,22 +3924,6 @@ export const useChatStore = defineStore('chat', () => {
     window.dispatchEvent(event)
   }
 
-  // 创建一个专家会话：用专家 id 作为 agent 标识，专家名称作为标题。
-  // 会话在用户首次发送消息时由后端持久化；这里仅创建本地占位。
-  function startExpertChat(expert: {
-    id: string
-    path: string
-    name: string
-    emoji?: string
-  }, instructions?: string): Promise<{ id: string }> {
-    const session = createSession({ source: 'api_server', instructions })
-    session.title = expert.name
-    session.agent = expert.id
-    activeSessionId.value = session.id
-    activeSession.value = session
-    return Promise.resolve({ id: session.id })
-  }
-
   return {
     sessions,
     runtimeMode,
@@ -3995,6 +3978,5 @@ export const useChatStore = defineStore('chat', () => {
     loadWorkspaceRunChangeFile,
     setSessionReasoningEffort,
     setRuntimeMode,
-    startExpertChat,
   }
 })

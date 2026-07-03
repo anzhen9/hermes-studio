@@ -181,7 +181,6 @@ export default {
   // Sidebar
   sidebar: {
     chat: 'Chat',
-    experts: 'Experts',
     backToChat: 'Back',
     search: 'Search',
     apiRelay: 'API Relay',
@@ -400,18 +399,6 @@ export default {
   drawer: {
     terminal: 'Terminal',
     files: 'Workspace',
-  },
-
-  // Experts
-  experts: {
-    title: 'Experts',
-    total: '{count} experts',
-    agentCount: '{count}',
-    searchPlaceholder: 'Search experts...',
-    noMatch: 'No matching experts',
-    loadFailed: 'Failed to start expert session',
-    sampleQuestions: 'Sample questions',
-    directChat: 'Start chat',
   },
 
   // Chat
