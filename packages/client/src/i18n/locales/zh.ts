@@ -199,6 +199,7 @@ export default {
     logs: '日志',
     usage: '用量',
     performance: '性能监控',
+    journey: '学习轨迹',
     skillsUsage: '技能用量',
     channels: '频道',
     gateways: '网关',
@@ -397,10 +398,32 @@ export default {
     noActiveSessions: '暂无活跃会话',
   },
 
-  // 抽屉
-  drawer: {
-    terminal: '终端',
-    files: '工作区',
+  journey: {
+    title: '学习轨迹',
+    play: '播放学习轨迹',
+    pause: '暂停学习轨迹',
+    refresh: '刷新',
+    loadFailed: '学习轨迹加载失败',
+    nodes: '节点',
+    edges: '关系',
+    skills: '技能',
+    memories: '记忆',
+    clusters: '分组',
+    profile: 'Profile',
+    source: '来源',
+    learnedSkills: '已学习技能',
+    memorySkillEdges: '记忆关联',
+    allKinds: '全部类型',
+    allCategories: '全部分组',
+    searchPlaceholder: '搜索节点',
+    noClusters: '暂无分组',
+    noNodes: '暂无学习轨迹节点',
+    noCategory: '未分组',
+    category: '分组',
+    useCount: '使用次数',
+    createdBy: '创建来源',
+    timestamp: '时间',
+    pinned: '已固定',
   },
 
   // 专家
@@ -413,6 +436,12 @@ export default {
     loadFailed: '启动专家会话失败',
     sampleQuestions: '示例问题',
     directChat: '直接对话',
+  },
+
+  // 抽屉
+  drawer: {
+    terminal: '终端',
+    files: '工作区',
   },
 
   // 对话
