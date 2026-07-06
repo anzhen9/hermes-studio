@@ -3,8 +3,10 @@ import { existsSync, accessSync, chmodSync, constants as fsConstants, readFileSy
 import { homedir } from 'os'
 import { spawn, type ChildProcess } from 'child_process'
 import { createSession, addMessage, getSession, updateSession, updateSessionStats } from '../../db/hermes/session-store'
+import type { ApiMode } from './types'
 import { logger } from '../logger'
 import { applyResponseStreamEvent, flushResponseRunToDb } from '../hermes/run-chat/response-stream'
+import { calcAndUpdateUsage, updateMessageContextTokenUsage } from '../hermes/run-chat/usage'
 import { extractResponseText } from '../hermes/run-chat/response-utils'
 import type { SessionState } from '../hermes/run-chat/types'
 import type { CanonicalResponsesEvent } from './adapters/responses-stream'
@@ -61,6 +63,7 @@ export interface CodingAgentRunLaunch {
   profile: string
   provider: string
   model: string
+  apiMode?: ApiMode
   sessionId: string
   agentNativeSessionId?: string
   nativeResume?: boolean
@@ -71,6 +74,7 @@ export interface CodingAgentRunLaunch {
   env?: NodeJS.ProcessEnv
   state?: SessionState
   sessionSource?: 'global_agent' | 'workflow'
+  reasoningEffort?: string
 }
 
 interface ManagedCodingAgentRun {
@@ -414,6 +418,8 @@ export class CodingAgentRunManager {
     mode?: 'scoped' | 'global'
     provider?: string
     model?: string
+    reasoningEffort?: string
+    apiMode?: ApiMode
   }): boolean {
     const run = this.getBySession(sessionId)
     if (!run || run.exited) return false
@@ -425,7 +431,10 @@ export class CodingAgentRunManager {
       const model = String(launch.model || '').trim()
       if (provider && run.launch.provider !== provider) return false
       if (model && run.launch.model !== model) return false
+      const apiMode = String(launch.apiMode || '').trim()
+      if (apiMode && String(run.launch.apiMode || '').trim() !== apiMode) return false
     }
+    if (String(run.launch.reasoningEffort || '').trim() !== String(launch.reasoningEffort || '').trim()) return false
     if (!hasManagedHermesMcpConfig(run)) return false
     return true
   }
@@ -613,6 +622,7 @@ export class CodingAgentRunManager {
       flushResponseRunToDb(run.state, run.launch.sessionId)
       run.state.responseRun = undefined
       updateSessionStats(run.launch.sessionId)
+      void this.refreshCodingAgentUsage(run)
       const final = (storageSafeResponseEvent.data as any).response || storageSafeResponseEvent.data
       const finalText = extractResponseText(final)
       const terminalError = storageSafeResponseEvent.type === 'response.failed'
@@ -633,6 +643,20 @@ export class CodingAgentRunManager {
         this.emitAndMarkPrintChatRunCompleted(run, chatCompletionEvent, chatCompletionPayload)
       }
     }
+  }
+
+  private async refreshCodingAgentUsage(run: ManagedCodingAgentRun) {
+    const emitUsage = (event: string, payload: any) => {
+      this.emitToChat(run.launch.sessionId, event, payload)
+    }
+    const usage = await calcAndUpdateUsage(run.launch.sessionId, run.state, emitUsage)
+    updateMessageContextTokenUsage(
+      run.launch.sessionId,
+      run.state,
+      emitUsage,
+      usage.inputTokens + usage.outputTokens,
+      usage,
+    )
   }
 
   private normalizeCodexChatTextEvent(run: ManagedCodingAgentRun, event: CanonicalResponsesEvent): CanonicalResponsesEvent | null {
@@ -678,12 +702,13 @@ export class CodingAgentRunManager {
     createSession({
       id: run.launch.sessionId,
       profile: run.launch.profile,
-        source,
-        agent: run.launch.agentId === 'codex' ? 'codex' : 'claude',
-        agent_session_id: run.id,
-        agent_native_session_id: run.launch.agentNativeSessionId,
-        model: run.launch.model,
+      source,
+      agent: run.launch.agentId === 'codex' ? 'codex' : 'claude',
+      agent_session_id: run.id,
+      agent_native_session_id: run.launch.agentNativeSessionId,
+      model: run.launch.model,
       provider: run.launch.provider,
+      api_mode: run.launch.apiMode || '',
       title: '',
       workspace: run.launch.workspaceDir,
     })
