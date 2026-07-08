@@ -12,7 +12,6 @@
 #include "driver/i2s.h"
 #include "esp_system.h"
 #include "esp_rom_sys.h"
-#include "mbedtls/base64.h"
 
 namespace {
 constexpr char kApName[] = "HStudio-WIFI";
@@ -65,25 +64,37 @@ constexpr uint32_t kMcuFailureIdleDelayMs = 20000;
 constexpr uint32_t kMcuAudioDefaultDurationMs = 1800;
 constexpr uint32_t kMcuAudioMaxDurationMs = 9000;
 constexpr uint32_t kMcuAudioHttpTimeoutMs = 30000;
+constexpr uint32_t kMcuAudioPrebufferMs = 240;
+constexpr uint32_t kMcuAudioPrebufferTimeoutMs = 2500;
+constexpr size_t kMcuAudioPrebufferMaxBytes = 16 * 1024;
+constexpr uint32_t kMcuAudioDrainMinMs = 180;
+constexpr uint32_t kMcuAudioDrainMaxMs = 650;
+constexpr uint32_t kMcuAudioTailSilenceMs = 120;
+constexpr size_t kMcuAdpcmHeaderBytes = 20;
+constexpr size_t kMcuAdpcmReadChunkBytes = 256;
+constexpr size_t kMcuAdpcmOutputFrames = 256;
 constexpr uint32_t kBootDebounceMs = 80;
 constexpr uint32_t kBootInputArmDelayMs = 2500;
 constexpr uint32_t kBootLongPressMs = 360;
 constexpr uint32_t kBootDoubleClickMs = 320;
+constexpr uint32_t kVoiceStreamReleaseDebounceMs = 240;
 constexpr uint32_t kWifiDisconnectGraceMs = 8000;
 constexpr uint32_t kBatteryReadIntervalMs = 5000;
 constexpr bool kAutoOtaEnabled = false;
 constexpr uint32_t kVoiceRecordMs = 4000;
-constexpr uint32_t kVoiceStreamRecordMs = 10000;
+constexpr uint32_t kVoiceStreamRecordMs = 30000;
 constexpr uint32_t kVoiceRecordMinMs = 300;
-constexpr uint32_t kVoiceRecordHardTimeoutMs = 12000;
+constexpr uint32_t kVoiceRecordHardTimeoutMs = 35000;
 constexpr uint32_t kVoiceVadRmsStart = 190;
 constexpr uint32_t kVoiceVadPeakStart = 480;
 constexpr uint32_t kVoiceVadActiveThreshold = 260;
 constexpr uint32_t kVoiceVadMinActiveSamples = 16;
-constexpr int kVoiceInputGainPermille = 2800;
+constexpr int kVoiceInputGainPermille = 1800;
 constexpr int kAudioSampleRate = 24000;
+constexpr int kVoiceInputSampleRate = 16000;
 constexpr int kMcuAudioDefaultSampleRate = 24000;
-constexpr size_t kVoiceRecordMaxFrames = (kAudioSampleRate * kVoiceRecordMs) / 1000UL;
+constexpr size_t kVoiceStreamChunkFrames = 4096;
+constexpr size_t kVoiceRecordMaxFrames = (kVoiceInputSampleRate * kVoiceRecordMs) / 1000UL;
 constexpr size_t kVoiceRecordBufferBytes = 44 + kVoiceRecordMaxFrames * sizeof(int16_t);
 constexpr uint8_t kDefaultOutputVolumePercent = 70;
 constexpr int16_t kVoiceOutputLimit = 24000;
@@ -93,7 +104,13 @@ constexpr i2s_port_t kI2sPort = I2S_NUM_0;
 Preferences prefs;
 WebServer server(80);
 WiFiUDP lanUdp;
-WiFiClient mcuWsClient;
+WiFiClient mcuWsPlainClient;
+WiFiClientSecure mcuWsSecureClient;
+WiFiClient *mcuWsClient = &mcuWsPlainClient;
+WiFiClient mcuAudioPlainClient;
+WiFiClientSecure mcuAudioSecureClient;
+uint8_t mcuAdpcmInputBuffer[kMcuAdpcmReadChunkBytes];
+int16_t mcuAdpcmStereoBuffer[kMcuAdpcmOutputFrames * 2];
 bool wifiReady = false;
 bool setupApMode = false;
 bool oledFound = false;
@@ -139,7 +156,10 @@ String pendingProfileDeviceKey;
 String activeDeviceKey;
 String activeDeviceUrl;
 String mcuAuthToken;
+String mcuSocketRelayUrl;
 String mcuSocketTargetKey;
+String mcuRemoteDiscoveryToken;
+bool mcuSocketReconnectBlocked = false;
 String mcuInteractionId;
 String mcuInteractionStatus = "idle";
 String mcuInteractionText;
@@ -182,11 +202,17 @@ struct McuAudioSegment {
   bool completionManagedByServer = false;
 };
 
+struct VoiceStreamChunk {
+  bool done = false;
+  uint32_t offset = 0;
+  size_t bytes = 0;
+  int16_t samples[kVoiceStreamChunkFrames] = {};
+};
+
 McuAudioSegment mcuAudioQueue[kMaxMcuAudioQueue];
 int mcuAudioHead = 0;
 int mcuAudioCount = 0;
 McuAudioSegment mcuCurrentAudio;
-uint8_t voiceWavBuffer[kVoiceRecordBufferBytes];
 
 void markMcuInteraction(const String &interactionId, const String &status, const String &text);
 void triggerBootVoiceTurn();
@@ -221,10 +247,13 @@ struct LanDevice {
   String webVersion;
   String agentVersion;
   String profile;
+  String relayUrl;
   uint16_t httpPort = 0;
   uint32_t responseMs = 0;
   uint32_t lastSeenMs = 0;
   bool loggedIn = false;
+  bool manualSource = false;
+  bool remoteLogin = false;
 };
 
 LanDevice lanDevices[kMaxLanDevices];
@@ -519,6 +548,7 @@ void drawEye(int x, int y, bool blink, bool thinking, bool error) {
 String interactionStatusLabel() {
   if (mcuInteractionStatus == F("transcribing")) return F("STT");
   if (mcuInteractionStatus == F("thinking")) return F("THINK");
+  if (mcuInteractionStatus == F("clearing")) return F("CLEAR");
   if (mcuInteractionStatus == F("tool")) return F("TOOL");
   if (mcuInteractionStatus == F("speaking")) return F("SPEAK");
   if (mcuInteractionStatus == F("completed")) return F("DONE");
@@ -739,6 +769,7 @@ String mcuDeviceCode() {
 }
 
 String mcuSocketStateLabel() {
+  if (mcuSocketReconnectBlocked) return F("已被其他设备接管");
   if (mcuSocketNamespaceReady) return F("已连接");
   if (mcuSocketConnected) return F("握手中");
   if (wsReady) return F("重连中");
@@ -922,6 +953,42 @@ String jsonObjectValue(const String &json, const __FlashStringHelper *key) {
   return "";
 }
 
+String jsonArrayValue(const String &json, const __FlashStringHelper *key) {
+  String pattern = String(F("\"")) + key + F("\"");
+  int keyAt = json.indexOf(pattern);
+  if (keyAt < 0) return "";
+  int colonAt = json.indexOf(':', keyAt + pattern.length());
+  if (colonAt < 0) return "";
+  int openAt = json.indexOf('[', colonAt + 1);
+  if (openAt < 0) return "";
+
+  bool inString = false;
+  bool escaped = false;
+  int depth = 0;
+  for (int i = openAt; i < static_cast<int>(json.length()); ++i) {
+    char c = json[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (c == '\\') {
+      escaped = inString;
+      continue;
+    }
+    if (c == '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (c == '[') ++depth;
+    if (c == ']') {
+      --depth;
+      if (depth == 0) return json.substring(openAt, i + 1);
+    }
+  }
+  return "";
+}
+
 int jsonIntValue(const String &json, const __FlashStringHelper *key) {
   String pattern = String(F("\"")) + key + F("\"");
   int keyAt = json.indexOf(pattern);
@@ -963,8 +1030,8 @@ void writeWavHeader(uint8_t *wav, uint32_t dataBytes) {
   putLe32(wav + 16, 16);
   putLe16(wav + 20, 1);
   putLe16(wav + 22, 1);
-  putLe32(wav + 24, kAudioSampleRate);
-  putLe32(wav + 28, kAudioSampleRate * 2);
+  putLe32(wav + 24, kVoiceInputSampleRate);
+  putLe32(wav + 28, kVoiceInputSampleRate * 2);
   putLe16(wav + 32, 2);
   putLe16(wav + 34, 16);
   memcpy(wav + 36, "data", 4);
@@ -1150,8 +1217,8 @@ bool configureI2sBus() {
   config.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
   config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
   config.intr_alloc_flags = 0;
-  config.dma_buf_count = 6;
-  config.dma_buf_len = 256;
+  config.dma_buf_count = 24;
+  config.dma_buf_len = 512;
   config.use_apll = false;
   config.tx_desc_auto_clear = true;
   config.fixed_mclk = 0;
@@ -1206,17 +1273,32 @@ int16_t shapeVoiceInputSample(int16_t sample) {
   return static_cast<int16_t>(value);
 }
 
+void drainI2sPlayback(uint32_t writtenBytes, uint8_t channels, uint32_t sampleRate) {
+  if (writtenBytes == 0 || channels == 0 || sampleRate == 0) return;
+  uint32_t frameBytes = static_cast<uint32_t>(channels) * sizeof(int16_t);
+  uint32_t silenceFrames = (sampleRate * kMcuAudioTailSilenceMs) / 1000UL;
+  int16_t silence[128 * 2] = {};
+  while (silenceFrames > 0) {
+    uint32_t frames = min<uint32_t>(silenceFrames, 128);
+    size_t written = 0;
+    esp_err_t err = i2s_write(kI2sPort, silence, frames * frameBytes, &written, pdMS_TO_TICKS(1000));
+    if (err != ESP_OK || written == 0) break;
+    silenceFrames -= written / frameBytes;
+    yield();
+  }
+  uint32_t totalMs = (writtenBytes / frameBytes) * 1000UL / sampleRate;
+  uint32_t drainMs = min<uint32_t>(max<uint32_t>(totalMs / 4, kMcuAudioDrainMinMs), kMcuAudioDrainMaxMs);
+  delay(drainMs);
+  yield();
+}
+
 uint16_t sampleMagnitude(int16_t sample) {
   return sample == INT16_MIN ? 32768 : static_cast<uint16_t>(sample < 0 ? -sample : sample);
 }
 
 int16_t voiceInputMonoSample(int16_t left, int16_t right) {
-  uint16_t leftMag = sampleMagnitude(left);
-  uint16_t rightMag = sampleMagnitude(right);
-  if (leftMag > rightMag * 2U) return shapeVoiceInputSample(left);
-  if (rightMag > leftMag * 2U) return shapeVoiceInputSample(right);
-  int32_t mixed = (static_cast<int32_t>(left) + static_cast<int32_t>(right)) / 2;
-  return shapeVoiceInputSample(static_cast<int16_t>(mixed));
+  (void)left;
+  return shapeVoiceInputSample(right);
 }
 
 void shapePcmBuffer(uint8_t *buffer, size_t length) {
@@ -1317,13 +1399,18 @@ bool recordVoiceWav(uint8_t **outWav, size_t *outLen) {
   }
 
   const uint32_t maxFrames = kVoiceRecordMaxFrames;
-  uint8_t *wav = voiceWavBuffer;
+  uint8_t *wav = static_cast<uint8_t *>(malloc(kVoiceRecordBufferBytes));
+  if (!wav) {
+    lastAudioDetail = String(F("voice wav alloc failed heap=")) + String(ESP.getFreeHeap());
+    setOledStatus(OledMode::Error, F("VOICE"), F("MEMORY"), 0);
+    return false;
+  }
   memset(wav, 0, 44);
 
   audioBusy = true;
   setPowerAmp(false);
   es8311UpdateBits(0x31, 0x60, 0x60);
-  setI2sSampleRate(kAudioSampleRate);
+  setI2sSampleRate(kVoiceInputSampleRate);
   i2s_zero_dma_buffer(kI2sPort);
   setOledStatus(OledMode::Think, F("LISTEN"), F("SAY NOW"), 0);
 
@@ -1368,6 +1455,7 @@ bool recordVoiceWav(uint8_t **outWav, size_t *outLen) {
     esp_err_t err = i2s_read(kI2sPort, readBuffer, sizeof(readBuffer), &bytesRead, pdMS_TO_TICKS(40));
     if (err != ESP_OK) {
       audioBusy = false;
+      free(wav);
       lastAudioDetail = String(F("I2S read failed err=")) + String(static_cast<int>(err));
       setOledStatus(OledMode::Error, F("I2S"), F("READ FAIL"), 0);
       return false;
@@ -1411,6 +1499,7 @@ bool recordVoiceWav(uint8_t **outWav, size_t *outLen) {
   const uint32_t dataBytes = framesDone * sizeof(int16_t);
   if (dataBytes == 0) {
     audioBusy = false;
+    free(wav);
     lastAudioDetail = String(F("voice record empty, i2s empty reads=")) + String(emptyReads);
     setOledStatus(OledMode::Error, F("MIC"), F("NO DATA"), 0);
     return false;
@@ -1461,6 +1550,10 @@ String endpointLabel(const String &endpointKind, uint16_t httpPort) {
   if (endpointKind == F("web")) return F("Web 端");
   if (endpointKind == F("desktop")) return F("桌面端");
   return String(F("自定义端口 ")) + httpPort;
+}
+
+String lanDeviceSourceLabel(const LanDevice &device) {
+  return (device.manualSource || device.remoteLogin) ? String(F("远程获取局域网")) : String(F("局域网"));
 }
 
 String lanDeviceKey(const String &id, const String &endpointKind, uint16_t httpPort) {
@@ -1564,12 +1657,14 @@ void clearProfileForDevice(const String &deviceKey, const String &addressKey) {
     prefs.remove("active_key");
     prefs.remove("active_addr");
     prefs.remove("active_url");
+    prefs.remove("relay_url");
     prefs.remove("auth_token");
   }
   prefs.end();
   if (activeDeviceKey == deviceKey) {
     activeDeviceKey = "";
     activeDeviceUrl = "";
+    mcuSocketRelayUrl = "";
     mcuAuthToken = "";
     disconnectMcuSocketClient();
   }
@@ -1581,10 +1676,13 @@ void applySavedProfile(LanDevice &device) {
   profile.trim();
   device.profile = profile;
   device.loggedIn = profile.length() > 0;
+  prefs.begin("mcu", true);
+  String activeKey = prefs.getString("active_key", "");
+  String activeAddr = prefs.getString("active_addr", "");
+  String relayUrl = prefs.getString("relay_url", "");
+  prefs.end();
+  device.remoteLogin = relayUrl.length() > 0 && (activeKey == lanDeviceKey(device) || activeAddr == lanAddressKey(device));
   if (activeDeviceKey.length() == 0) {
-    prefs.begin("mcu", true);
-    String activeAddr = prefs.getString("active_addr", "");
-    prefs.end();
     if (activeAddr.length() > 0 && activeAddr == lanAddressKey(device)) {
       activeDeviceKey = lanDeviceKey(device);
     }
@@ -1596,7 +1694,8 @@ String activeDeviceLabel() {
   for (int i = 0; i < lanDeviceCount; ++i) {
     if (lanDeviceKey(lanDevices[i]) == activeDeviceKey) {
       return endpointLabel(lanDevices[i].endpointKind, lanDevices[i].httpPort) + F(" · ") +
-             lanDevices[i].name + F(" · ") + lanDevices[i].profile;
+             lanDeviceSourceLabel(lanDevices[i]) + F(" · ") + lanDevices[i].name + F(" · ") +
+             lanDevices[i].profile;
     }
   }
   return activeDeviceKey;
@@ -1631,7 +1730,7 @@ int oldestLanDeviceSlot() {
 }
 
 void rememberLanDeviceInfo(const String &json, const String &host, const String &baseUrl, uint32_t responseMs,
-                           bool requireAnnouncement) {
+                           bool requireAnnouncement, bool manualSource = false) {
   if (requireAnnouncement) {
     if (jsonStringValue(json, F("type")) != F("hermes.announce")) return;
     if (jsonIntValue(json, F("version")) != 1) return;
@@ -1662,13 +1761,16 @@ void rememberLanDeviceInfo(const String &json, const String &host, const String 
   device.url = baseUrl.length() > 0 ? baseUrl : String(F("http://")) + device.ip + F(":") + httpPort;
   device.webVersion = jsonStringValue(json, F("hermes_web_ui_version"));
   device.agentVersion = jsonStringValue(json, F("hermes_agent_version"));
+  device.relayUrl = jsonStringValue(json, F("relay_url"));
+  device.relayUrl.trim();
   device.responseMs = responseMs;
   device.lastSeenMs = millis();
+  device.manualSource = manualSource;
   applySavedProfile(device);
 }
 
 void rememberLanDevice(const String &json, const IPAddress &remoteIp, uint32_t responseMs) {
-  rememberLanDeviceInfo(json, remoteIp.toString(), "", responseMs, true);
+  rememberLanDeviceInfo(json, remoteIp.toString(), "", responseMs, true, false);
 }
 
 String manualDevicePrefKey(int index) {
@@ -1742,7 +1844,7 @@ bool fetchManualDeviceInfo(const String &input, String *error) {
     if (error) *error = F("机器信息缺少设备身份");
     return false;
   }
-  rememberLanDeviceInfo(body, host, baseUrl, millis() - started, false);
+  rememberLanDeviceInfo(body, host, baseUrl, millis() - started, false, true);
   persistManualDeviceUrl(baseUrl);
   return true;
 }
@@ -1760,6 +1862,116 @@ void refreshManualDevices() {
     if (urls[i].length() == 0) continue;
     String ignored;
     fetchManualDeviceInfo(urls[i], &ignored);
+  }
+}
+
+void rememberRemoteMachineInfo(const String &json) {
+  if (!jsonBoolValue(json, F("connected"))) return;
+  String url = jsonStringValue(json, F("url"));
+  String host;
+  String baseUrl = normalizedManualDeviceUrl(url, &host);
+  if (baseUrl.length() == 0) return;
+  if (jsonStringValue(json, F("device_id")).length() == 0 ||
+      jsonStringValue(json, F("device_public_key")).length() == 0) {
+    return;
+  }
+  rememberLanDeviceInfo(json, host, baseUrl, 0, false, true);
+}
+
+void rememberRemoteMachineList(const String &json) {
+  String machines = jsonArrayValue(json, F("machines"));
+  if (machines.length() == 0) return;
+  bool inString = false;
+  bool escaped = false;
+  int depth = 0;
+  int objectStart = -1;
+  for (int i = 0; i < static_cast<int>(machines.length()); ++i) {
+    char c = machines[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (c == '\\') {
+      escaped = inString;
+      continue;
+    }
+    if (c == '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (c == '{') {
+      if (depth == 0) objectStart = i;
+      ++depth;
+    } else if (c == '}') {
+      --depth;
+      if (depth == 0 && objectStart >= 0) {
+        rememberRemoteMachineInfo(machines.substring(objectStart, i + 1));
+        objectStart = -1;
+      }
+    }
+  }
+}
+
+String normalizedRelayBaseUrl(const String &input) {
+  String raw = input;
+  raw.trim();
+  while (raw.endsWith("/")) raw.remove(raw.length() - 1);
+  if (raw.length() == 0) return "";
+  String scheme;
+  String host;
+  uint16_t port = 0;
+  String path;
+  if (!parseAudioUrl(raw, &scheme, &host, &port, &path)) return "";
+  return scheme + F("://") + host + F(":") + String(port);
+}
+
+bool relayUrlAlreadyQueued(const String urls[], int count, const String &url) {
+  for (int i = 0; i < count; ++i) {
+    if (urls[i] == url) return true;
+  }
+  return false;
+}
+
+void queueRelayUrl(String urls[], int *count, const String &url) {
+  if (!count || *count >= kMaxLanDevices + 1) return;
+  String normalized = normalizedRelayBaseUrl(url);
+  if (normalized.length() == 0 || relayUrlAlreadyQueued(urls, *count, normalized)) return;
+  urls[*count] = normalized;
+  *count += 1;
+}
+
+void fetchRemoteDevicesFromRelay(const String &relayBaseUrl) {
+  if (mcuRemoteDiscoveryToken.length() == 0) return;
+  if (normalizedRelayBaseUrl(mcuSocketRelayUrl) != relayBaseUrl) {
+    Serial.printf("Remote machine discovery skipped relay=%s without token\n", relayBaseUrl.c_str());
+    return;
+  }
+  String endpoint = relayBaseUrl + F("/global-agent/devices/") + mcuDeviceCode() + F("/machines");
+  HTTPClient http;
+  http.setTimeout(kMcuLoginTimeoutMs);
+  if (!http.begin(endpoint)) return;
+  http.addHeader(F("Authorization"), String(F("Bearer ")) + mcuRemoteDiscoveryToken);
+  int code = http.GET();
+  String body = http.getString();
+  http.end();
+  if (code < 200 || code >= 300) {
+    Serial.printf("Remote machine discovery failed code=%d body=%s\n", code, body.substring(0, 160).c_str());
+    return;
+  }
+  rememberRemoteMachineList(body);
+}
+
+void refreshRemoteDevices() {
+  if (!wifiReady || WiFi.status() != WL_CONNECTED) return;
+  String relayUrls[kMaxLanDevices + 1];
+  int relayUrlCount = 0;
+  queueRelayUrl(relayUrls, &relayUrlCount, mcuSocketRelayUrl);
+  for (int i = 0; i < lanDeviceCount; ++i) {
+    queueRelayUrl(relayUrls, &relayUrlCount, lanDevices[i].relayUrl);
+  }
+  for (int i = 0; i < relayUrlCount; ++i) {
+    fetchRemoteDevicesFromRelay(relayUrls[i]);
   }
 }
 
@@ -1809,6 +2021,7 @@ void scanLanDevices() {
   }
   lastLanDiscoveryAtMs = millis();
   refreshManualDevices();
+  refreshRemoteDevices();
 }
 
 bool ssidAlreadyScanned(const String &ssid) {
@@ -1861,6 +2074,7 @@ String pageStart(const String &title) {
 	                  "main{max-width:760px;margin:auto;padding:28px 18px 40px}.panel,.card{background:var(--surface);border:1px solid var(--line);border-radius:6px}.panel{padding:22px}.card{padding:16px;margin-top:12px}"
 	                  "h1{font-size:clamp(28px,5vw,44px);line-height:1.05;margin:0 0 10px}h2{font-size:18px;margin:0 0 10px}.lead,.hint{color:var(--muted);line-height:1.6}.lead{font-size:15px;margin:0 0 18px}.hint{font-size:12px;margin:0}.meta{font:12px/1.4 ui-monospace,'SFMono-Regular',Consolas,monospace;color:var(--muted);word-break:break-all}"
 	                  "form{display:grid;gap:12px}.field{display:grid;gap:7px}.label{font-size:12px;color:var(--muted)}input,select{width:100%;min-height:42px;border:1px solid var(--line);border-radius:6px;background:#fff;padding:10px 11px;font:14px/1.2 ui-monospace,'SFMono-Regular',Consolas,monospace;color:var(--ink)}select{appearance:none;-webkit-appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 18px) 18px,calc(100% - 13px) 18px;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:34px}input:focus,select:focus{outline:2px solid #cfcfcf;outline-offset:1px}"
+	                  ".choice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.choice{position:relative;display:block}.choice input{position:absolute;opacity:0;pointer-events:none}.choice-card{height:100%;min-height:96px;border:1px solid var(--line);border-radius:6px;background:#fff;padding:14px 14px 14px 42px;display:grid;align-content:start;gap:6px;cursor:pointer;transition:border-color .15s,background .15s,box-shadow .15s}.choice-dot{position:absolute;left:14px;top:16px;width:16px;height:16px;border:1px solid #aaa;border-radius:50%;background:#fff}.choice-title{font:700 15px/1.2 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif}.choice-copy{font-size:12px;line-height:1.5;color:var(--muted)}.choice-meta{margin-top:2px;font:700 10px/1 ui-monospace,'SFMono-Regular',Consolas,monospace;color:#888;text-transform:uppercase}.choice input:checked+.choice-card{border-color:var(--accent);background:#f7f7f7;box-shadow:inset 0 0 0 1px var(--accent)}.choice input:checked+.choice-card .choice-dot{border-color:var(--accent);box-shadow:inset 0 0 0 4px #fff;background:var(--accent)}.choice input:focus+.choice-card{outline:2px solid #cfcfcf;outline-offset:1px}@media(max-width:560px){.choice-grid{grid-template-columns:1fr}.choice-card{min-height:84px}}"
 	                  ".tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);margin:18px -22px 18px;padding:0 22px}.tab{border:1px solid var(--line);border-bottom:0;border-radius:6px 6px 0 0;background:#f4f4f4;min-height:38px;padding:10px 14px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none}.tab.active{background:var(--surface);position:relative;top:1px}.info-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.info-row{border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}.info-row span{display:block;color:var(--muted);font-size:12px;margin-bottom:7px}.info-row strong{display:block;font:600 14px/1.35 ui-monospace,'SFMono-Regular',Consolas,monospace;word-break:break-all}@media(max-width:560px){.info-grid{grid-template-columns:1fr}}"
 	                  ".btn{border:1px solid var(--line);background:var(--surface);border-radius:6px;min-height:38px;padding:9px 13px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn.warn{background:var(--warn);border-color:var(--warn);color:#fff}.btn-row{display:flex;gap:10px;flex-wrap:wrap}.ok{color:var(--good)}.bad{color:var(--warn)}"
 	                  "</style></head><body><main>");
@@ -1873,6 +2087,9 @@ String pageEnd() {
 
 void sendWifiPage() {
   String savedSsid = prefString("ssid");
+  if (savedSsid.length() == 0 && wifiReady && WiFi.status() == WL_CONNECTED) {
+    savedSsid = WiFi.SSID();
+  }
   bool savedInScan = false;
   for (int i = 0; i < scannedNetworkCount; ++i) {
     if (scannedSsids[i] == savedSsid) {
@@ -1955,6 +2172,9 @@ void sendStatusPage() {
   appendInfoRow(html, F("运行时间"), uptimeText());
   appendInfoRow(html, F("可用内存"), String(ESP.getFreeHeap()) + F(" bytes"));
   appendInfoRow(html, F("服务连接"), mcuSocketStateLabel());
+  if (mcuSocketRelayUrl.length() > 0) {
+    appendInfoRow(html, F("远程转发"), mcuSocketRelayUrl);
+  }
   appendInfoRow(html, F("音频硬件"), String(es8311Ready && i2sReady ? F("就绪") : F("未就绪")) + F(" · ") + lastAudioDetail);
   appendInfoRow(html, F("音量"), String(outputVolumePercent) + F("%"));
   appendInfoRow(html, F("电量"), F("未启用"));
@@ -2005,6 +2225,8 @@ void sendStatusPage() {
       bool online = millis() - device.lastSeenMs < kLanDiscoveryStaleMs;
       html += F("<div class='info-row'><span>");
       html += endpointLabel(device.endpointKind, device.httpPort);
+      html += F(" · ");
+      html += lanDeviceSourceLabel(device);
       html += online ? F(" · 在线") : F(" · 可能离线");
       html += device.loggedIn ? F(" · 已登录") : F(" · 未登录");
       if (lanDeviceKey(device) == activeDeviceKey) html += F(" · 当前交互");
@@ -2180,7 +2402,7 @@ bool lanDeviceIndex(int index, LanDevice **device) {
   return true;
 }
 
-String mcuLoginPayload(const String &account, const String &password) {
+String mcuLoginPayload(const String &account, const String &password, bool useRemoteRelay) {
   String payload;
   payload.reserve(560);
   payload += F("{\"token\":\"");
@@ -2194,11 +2416,13 @@ String mcuLoginPayload(const String &account, const String &password) {
   payload += escapeJson(account);
   payload += F("\",\"password\":\"");
   payload += escapeJson(password);
+  payload += F("\",\"relayMode\":\"");
+  payload += useRemoteRelay ? F("remote") : F("lan");
   payload += F("\"}");
   return payload;
 }
 
-bool runMcuLogin(LanDevice &device, const String &account, const String &password) {
+bool runMcuLogin(LanDevice &device, const String &account, const String &password, bool useRemoteRelay = false) {
   String endpoint = device.url;
   while (endpoint.endsWith("/")) endpoint.remove(endpoint.length() - 1);
   endpoint += F("/api/auth/mcu-login");
@@ -2215,7 +2439,7 @@ bool runMcuLogin(LanDevice &device, const String &account, const String &passwor
   http.addHeader(F("Content-Type"), F("application/json"));
   http.addHeader(F("X-Hermes-Device-Id"), deviceId());
   http.addHeader(F("X-Hermes-Device-Name"), F("HStudio ESP32-C3"));
-  int code = http.POST(mcuLoginPayload(account, password));
+  int code = http.POST(mcuLoginPayload(account, password, useRemoteRelay));
   String response = http.getString();
   http.end();
 
@@ -2227,9 +2451,21 @@ bool runMcuLogin(LanDevice &device, const String &account, const String &passwor
     pendingProfileDeviceKey = lanDeviceKey(device);
     activeDeviceUrl = device.url;
     mcuAuthToken = jsonStringValue(response, F("token"));
+    String relayPayload = jsonObjectValue(response, F("relay"));
+    String relayUrl = relayPayload.length() > 0 ? jsonStringValue(relayPayload, F("url")) : "";
+    relayUrl.trim();
+    mcuSocketRelayUrl = relayUrl;
+    device.remoteLogin = mcuSocketRelayUrl.length() > 0;
+    mcuSocketReconnectBlocked = false;
     prefs.begin("mcu", false);
     prefs.putString("active_url", activeDeviceUrl);
+    if (mcuSocketRelayUrl.length() > 0) {
+      prefs.putString("relay_url", mcuSocketRelayUrl);
+    } else {
+      prefs.remove("relay_url");
+    }
     if (mcuAuthToken.length() > 0) prefs.putString("auth_token", mcuAuthToken);
+    prefs.remove("relay_replaced");
     prefs.end();
     parseLoginProfiles(response);
     connectMcuSocketClient();
@@ -2254,12 +2490,13 @@ bool savedCredentialsForDevice(const LanDevice &device, String *account, String 
 }
 
 bool autoLoginDevice(LanDevice &device) {
+  if (mcuSocketReconnectBlocked && mcuSocketRelayUrl.length() > 0) return false;
   String account;
   String password;
   if (!savedCredentialsForDevice(device, &account, &password)) return false;
   Serial.printf("Auto MCU login target=%s url=%s profile=%s\n",
                 lanDeviceKey(device).c_str(), device.url.c_str(), selectedProfile.c_str());
-  bool ok = runMcuLogin(device, account, password);
+  bool ok = runMcuLogin(device, account, password, mcuSocketRelayUrl.length() > 0);
   if (ok && selectedProfile.length() > 0) {
     String key = lanDeviceKey(device);
     String addr = lanAddressKey(device);
@@ -2314,18 +2551,29 @@ void sendMcuLoginPage() {
   }
 
   String html = pageStart(F("登录设备"));
+  bool defaultRemoteLogin = device->manualSource || device->remoteLogin;
   html += F("<section class='panel'><p class='meta'>MCU LOGIN</p><h1>登录 ");
   html += escapeHtml(endpointLabel(device->endpointKind, device->httpPort));
   html += F("</h1><p class='lead'>");
   html += escapeHtml(device->name);
+  html += F(" · ");
+  html += escapeHtml(lanDeviceSourceLabel(*device));
   html += F(" · ");
   html += escapeHtml(device->url);
   html += F("</p><form method='post' action='/device/login'><input type='hidden' name='i' value='");
   html += index;
   html += F("'><div class='field'><span class='label'>账号</span><input name='account' autocomplete='username' required></div>");
   html += F("<div class='field'><span class='label'>密码</span><input name='password' type='password' autocomplete='current-password' required></div>");
+  html += F("<div class='field'><span class='label'>连接方式</span><div class='choice-grid'>");
+  html += F("<label class='choice'><input type='radio' name='login_mode' value='lan'");
+  if (!defaultRemoteLogin) html += F(" checked");
+  html += F("><span class='choice-card'><span class='choice-dot'></span><span class='choice-title'>局域网登录</span><span class='choice-copy'>直连当前 Web UI，同一 Wi-Fi 下响应最快。</span><span class='choice-meta'>LOCAL</span></span></label>");
+  html += F("<label class='choice'><input type='radio' name='login_mode' value='remote'");
+  if (defaultRemoteLogin) html += F(" checked");
+  html += F("><span class='choice-card'><span class='choice-dot'></span><span class='choice-title'>远程登录(免费测试)</span><span class='choice-copy'>通过远程服务器转发，适合跨网络使用。</span><span class='choice-meta'>REMOTE</span></span></label>");
+  html += F("</div></div>");
   html += F("<div class='btn-row'><button class='btn primary' type='submit'>登录</button><a class='btn' href='/device'>返回</a></div>");
-  html += F("<p class='hint'>登录成功后会让你选择 profile，设备会使用登录 token 连接当前机器。</p></form></section>");
+  html += F("<p class='hint'>局域网登录会连接当前机器；远程登录会请求当前机器返回远程转发服务地址。</p></form></section>");
   html += pageEnd();
   server.send(200, F("text/html; charset=utf-8"), html);
 }
@@ -2387,7 +2635,9 @@ void handleMcuLogin() {
   int index = server.arg(F("i")).toInt();
   String account = server.arg(F("account"));
   String password = server.arg(F("password"));
+  String loginMode = server.arg(F("login_mode"));
   account.trim();
+  loginMode.trim();
   LanDevice *device = nullptr;
   if (!lanDeviceIndex(index, &device)) {
     server.send(404, F("text/plain; charset=utf-8"), F("设备不存在，请先刷新探测"));
@@ -2397,7 +2647,7 @@ void handleMcuLogin() {
     server.send(400, F("text/plain; charset=utf-8"), F("缺少账号或密码"));
     return;
   }
-  runMcuLogin(*device, account, password);
+  runMcuLogin(*device, account, password, loginMode == F("remote"));
   sendProfilePage();
 }
 
@@ -2446,6 +2696,9 @@ void setActiveDevice() {
 
   activeDeviceKey = lanDeviceKey(*device);
   activeDeviceUrl = device->url;
+  mcuSocketRelayUrl = "";
+  mcuSocketReconnectBlocked = false;
+  device->remoteLogin = false;
   selectedProfile = device->profile;
   mcuAuthToken = "";
   disconnectMcuSocketClient();
@@ -2455,7 +2708,9 @@ void setActiveDevice() {
   prefs.putString("active_url", activeDeviceUrl);
   prefs.putString("last_key", activeDeviceKey);
   prefs.putString("last_profile", selectedProfile);
+  prefs.remove("relay_url");
   prefs.remove("auth_token");
+  prefs.remove("relay_replaced");
   prefs.end();
 
   if (!runMcuLogin(*device, account, password)) {
@@ -2478,6 +2733,7 @@ void logoutDevice() {
   clearProfileForDevice(key, lanAddressKey(*device));
   device->profile = "";
   device->loggedIn = false;
+  device->remoteLogin = false;
   if (pendingProfileDeviceKey == key) pendingProfileDeviceKey = "";
   if (activeDeviceKey == key) activeDeviceKey = "";
   String lastKey;
@@ -2525,8 +2781,27 @@ String mcuStatusJson() {
   return json;
 }
 
+bool writeMcuWsBytes(const uint8_t *data, size_t length, uint32_t timeoutMs = 1500) {
+  if (!data && length > 0) return false;
+  size_t written = 0;
+  uint32_t startedAt = millis();
+  while (written < length) {
+    if (!mcuWsClient->connected()) return false;
+    size_t n = mcuWsClient->write(data + written, length - written);
+    if (n > 0) {
+      written += n;
+      startedAt = millis();
+      continue;
+    }
+    if (millis() - startedAt > timeoutMs) return false;
+    delay(2);
+    yield();
+  }
+  return true;
+}
+
 bool sendRawWsFrame(uint8_t opcode, const uint8_t *data, size_t length) {
-  if (!mcuWsClient.connected()) return false;
+  if (!mcuWsClient->connected()) return false;
   uint8_t header[14];
   size_t headerLen = 0;
   header[headerLen++] = 0x80 | (opcode & 0x0F);
@@ -2543,7 +2818,7 @@ bool sendRawWsFrame(uint8_t opcode, const uint8_t *data, size_t length) {
   uint8_t mask[4];
   for (uint8_t i = 0; i < 4; ++i) mask[i] = static_cast<uint8_t>(esp_random() & 0xFF);
   for (uint8_t i = 0; i < 4; ++i) header[headerLen++] = mask[i];
-  if (mcuWsClient.write(header, headerLen) != headerLen) return false;
+  if (!writeMcuWsBytes(header, headerLen)) return false;
 
   constexpr size_t kChunk = 256;
   uint8_t buffer[kChunk];
@@ -2553,8 +2828,9 @@ bool sendRawWsFrame(uint8_t opcode, const uint8_t *data, size_t length) {
     for (size_t i = 0; i < n; ++i) {
       buffer[i] = data[offset + i] ^ mask[(offset + i) & 3];
     }
-    if (mcuWsClient.write(buffer, n) != n) return false;
+    if (!writeMcuWsBytes(buffer, n)) return false;
     offset += n;
+    yield();
   }
   return true;
 }
@@ -2563,14 +2839,29 @@ bool sendRawWsText(const String &payload) {
   return sendRawWsFrame(0x1, reinterpret_cast<const uint8_t *>(payload.c_str()), payload.length());
 }
 
+String mcuSocketPayloadWithApiToken(const String &json) {
+  if (mcuAuthToken.length() == 0 || json.length() == 0 || json[0] != '{' || json.indexOf(F("\"apiToken\"")) >= 0) {
+    return json;
+  }
+  String out;
+  out.reserve(json.length() + mcuAuthToken.length() + 20);
+  out += F("{\"apiToken\":\"");
+  out += escapeJson(mcuAuthToken);
+  out += F("\",");
+  out += json.substring(1);
+  return out;
+}
+
 bool sendMcuSocketEvent(const String &event, const String &json) {
   if (!wsReady || !mcuSocketNamespaceReady || event.length() == 0) return false;
+  if (mcuSocketReconnectBlocked && event != F("mcu.ready")) return false;
+  String securedJson = mcuSocketPayloadWithApiToken(json.length() > 0 ? json : String(F("{}")));
   String payload;
-  payload.reserve(json.length() + event.length() + 28);
+  payload.reserve(securedJson.length() + event.length() + 28);
   payload += F("42/global-agent,[\"");
   payload += escapeJson(event);
   payload += F("\",");
-  payload += json.length() > 0 ? json : String(F("{}"));
+  payload += securedJson;
   payload += F("]");
   return sendRawWsText(payload);
 }
@@ -2579,24 +2870,6 @@ bool sendMcuSocketJson(const String &json) {
   String type = jsonStringValue(json, F("type"));
   if (type.length() == 0) type = F("mcu.event");
   return sendMcuSocketEvent(type, json);
-}
-
-String base64Encode(const uint8_t *data, size_t length) {
-  if (!data || length == 0) return "";
-  size_t outputLength = 0;
-  mbedtls_base64_encode(nullptr, 0, &outputLength, data, length);
-  String output;
-  output.reserve(outputLength + 1);
-  char *buffer = new char[outputLength + 1];
-  if (!buffer) return "";
-  if (mbedtls_base64_encode(reinterpret_cast<unsigned char *>(buffer), outputLength + 1, &outputLength, data, length) != 0) {
-    delete[] buffer;
-    return "";
-  }
-  buffer[outputLength] = '\0';
-  output = buffer;
-  delete[] buffer;
-  return output;
 }
 
 void sendWsJson(uint8_t, const String &json) {
@@ -2611,6 +2884,64 @@ uint32_t mcuAudioDurationFor(const McuAudioSegment &segment) {
   if (segment.durationMs > 0) return min(segment.durationMs, kMcuAudioMaxDurationMs);
   uint32_t estimated = kMcuAudioDefaultDurationMs + static_cast<uint32_t>(segment.text.length()) * 45UL;
   return min(max(estimated, kMcuAudioDefaultDurationMs), kMcuAudioMaxDurationMs);
+}
+
+size_t mcuAudioPrebufferTargetBytes(int contentLength, uint32_t sampleRate, uint8_t channels, size_t frameBytes) {
+  if (sampleRate == 0 || channels == 0 || frameBytes == 0) return 0;
+  size_t target = static_cast<size_t>((static_cast<uint64_t>(sampleRate) * channels * sizeof(int16_t) *
+                                       kMcuAudioPrebufferMs) / 1000ULL);
+  target = min(target, kMcuAudioPrebufferMaxBytes);
+  if (contentLength > 0) target = min(target, static_cast<size_t>(contentLength));
+  target -= target % frameBytes;
+  return target;
+}
+
+void releaseMcuAudioPrebuffer(uint8_t **buffer) {
+  if (buffer && *buffer) {
+    delete[] *buffer;
+    *buffer = nullptr;
+  }
+}
+
+bool prebufferPcmStream(WiFiClient *stream, int *remaining, size_t frameBytes, uint8_t channels,
+                        uint32_t sampleRate, uint8_t **bufferOut, size_t *lengthOut) {
+  if (!stream || !remaining || !bufferOut || !lengthOut) return false;
+  *bufferOut = nullptr;
+  *lengthOut = 0;
+  size_t target = mcuAudioPrebufferTargetBytes(*remaining, sampleRate, channels, frameBytes);
+  if (target == 0) return true;
+
+  uint8_t *buffer = new uint8_t[target];
+  if (!buffer) return true;
+
+  uint32_t startedAt = millis();
+  while (*lengthOut < target) {
+    int available = stream->available();
+    if (available <= 0) {
+      if (!stream->connected() && *remaining < 0) break;
+      if (millis() - startedAt > kMcuAudioPrebufferTimeoutMs) break;
+      delay(10);
+      yield();
+      continue;
+    }
+
+    size_t toRead = min(static_cast<size_t>(available), target - *lengthOut);
+    if (*remaining > 0) toRead = min(toRead, static_cast<size_t>(*remaining));
+    int bytesRead = stream->readBytes(buffer + *lengthOut, toRead);
+    if (bytesRead <= 0) continue;
+    *lengthOut += static_cast<size_t>(bytesRead);
+    if (*remaining > 0) *remaining -= bytesRead;
+    startedAt = millis();
+    yield();
+    if (*remaining == 0) break;
+  }
+
+  if (*lengthOut == 0) {
+    delete[] buffer;
+    return true;
+  }
+  *bufferOut = buffer;
+  return true;
 }
 
 bool playPcmStereoStream(WiFiClient *stream, int contentLength, uint32_t sampleRate) {
@@ -2634,37 +2965,56 @@ bool playPcmStereoStream(WiFiClient *stream, int contentLength, uint32_t sampleR
   uint32_t playedBytes = 0;
   uint32_t paddedBytes = 0;
   uint32_t idleStarted = millis();
+  uint8_t *prebuffer = nullptr;
+  size_t prebufferLength = 0;
+  size_t prebufferOffset = 0;
+  prebufferPcmStream(stream, &remaining, kAudioFrameBytes, 2, sampleRate, &prebuffer, &prebufferLength);
 
-  while (remaining != 0) {
+  while (prebufferOffset < prebufferLength || remaining != 0) {
     if (shouldInterruptAudioForVoice()) {
       lastAudioDetail = F("audio interrupted by listen");
+      releaseMcuAudioPrebuffer(&prebuffer);
       audioBusy = false;
       return false;
     }
-    int available = stream->available();
-    if (available <= 0) {
-      if (!stream->connected() && remaining < 0) break;
-      if (millis() - idleStarted > kMcuAudioHttpTimeoutMs) {
-        lastAudioDetail = F("audio stream timed out");
-        audioBusy = false;
-        markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
-        return false;
+    int bytesRead = 0;
+    bool fromPrebuffer = false;
+    if (prebufferOffset < prebufferLength) {
+      size_t toRead = min(kChunkBytes, prebufferLength - prebufferOffset);
+      memcpy(buffer + pendingBytes, prebuffer + prebufferOffset, toRead);
+      prebufferOffset += toRead;
+      bytesRead = static_cast<int>(toRead);
+      fromPrebuffer = true;
+      if (prebufferOffset >= prebufferLength) releaseMcuAudioPrebuffer(&prebuffer);
+    } else {
+      int available = stream->available();
+      if (available <= 0) {
+        if (!stream->connected() && remaining < 0) break;
+        if (millis() - idleStarted > kMcuAudioHttpTimeoutMs) {
+          lastAudioDetail = F("audio stream timed out");
+          releaseMcuAudioPrebuffer(&prebuffer);
+          audioBusy = false;
+          markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
+          return false;
+        }
+        delay(10);
+        yield();
+        continue;
       }
-      delay(10);
-      yield();
-      continue;
-    }
-    idleStarted = millis();
+      idleStarted = millis();
 
-    size_t toRead = min(static_cast<size_t>(available), kChunkBytes);
-    if (remaining > 0) toRead = min(toRead, static_cast<size_t>(remaining));
-    int bytesRead = stream->readBytes(buffer + pendingBytes, toRead);
-    if (bytesRead <= 0) continue;
+      size_t toRead = min(static_cast<size_t>(available), kChunkBytes);
+      if (remaining > 0) toRead = min(toRead, static_cast<size_t>(remaining));
+      bytesRead = stream->readBytes(buffer + pendingBytes, toRead);
+      if (bytesRead <= 0) continue;
+    }
+
+
     streamBytes += static_cast<uint32_t>(bytesRead);
 
     size_t bufferedBytes = pendingBytes + static_cast<size_t>(bytesRead);
     size_t alignedBytes = bufferedBytes - (bufferedBytes % kAudioFrameBytes);
-    if (remaining > 0) remaining -= bytesRead;
+    if (!fromPrebuffer && remaining > 0) remaining -= bytesRead;
     if (alignedBytes == 0) {
       pendingBytes = bufferedBytes;
       continue;
@@ -2675,6 +3025,7 @@ bool playPcmStereoStream(WiFiClient *stream, int contentLength, uint32_t sampleR
     esp_err_t err = i2s_write(kI2sPort, buffer, alignedBytes, &written, pdMS_TO_TICKS(1000));
     if (err != ESP_OK || written != alignedBytes) {
       lastAudioDetail = String(F("I2S write failed err=")) + String(static_cast<int>(err));
+      releaseMcuAudioPrebuffer(&prebuffer);
       audioBusy = false;
       markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
       return false;
@@ -2694,6 +3045,7 @@ bool playPcmStereoStream(WiFiClient *stream, int contentLength, uint32_t sampleR
     esp_err_t err = i2s_write(kI2sPort, buffer, kAudioFrameBytes, &written, pdMS_TO_TICKS(1000));
     if (err != ESP_OK || written != kAudioFrameBytes) {
       lastAudioDetail = String(F("I2S final write failed err=")) + String(static_cast<int>(err));
+      releaseMcuAudioPrebuffer(&prebuffer);
       audioBusy = false;
       markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
       return false;
@@ -2701,6 +3053,8 @@ bool playPcmStereoStream(WiFiClient *stream, int contentLength, uint32_t sampleR
     playedBytes += written;
   }
 
+  releaseMcuAudioPrebuffer(&prebuffer);
+  drainI2sPlayback(playedBytes, 2, sampleRate);
   i2s_zero_dma_buffer(kI2sPort);
   lastAudioAtMs = millis();
   lastAudioDetail = String(F("pcm played bytes=")) + String(playedBytes) +
@@ -2721,7 +3075,7 @@ bool playPcmMonoStream(WiFiClient *stream, int contentLength, uint32_t sampleRat
   audioBusy = true;
   setPowerAmp(true);
   es8311UpdateBits(0x31, 0x60, 0x00);
-  setI2sSampleRate(kAudioSampleRate);
+  setI2sSampleRate(sampleRate);
 
   constexpr size_t kInputChunkBytes = 512;
   constexpr size_t kMonoFrameBytes = 2;
@@ -2733,37 +3087,56 @@ bool playPcmMonoStream(WiFiClient *stream, int contentLength, uint32_t sampleRat
   uint32_t playedBytes = 0;
   uint32_t paddedBytes = 0;
   uint32_t idleStarted = millis();
+  uint8_t *prebuffer = nullptr;
+  size_t prebufferLength = 0;
+  size_t prebufferOffset = 0;
+  prebufferPcmStream(stream, &remaining, kMonoFrameBytes, 1, sampleRate, &prebuffer, &prebufferLength);
 
-  while (remaining != 0) {
+  while (prebufferOffset < prebufferLength || remaining != 0) {
     if (shouldInterruptAudioForVoice()) {
       lastAudioDetail = F("audio interrupted by listen");
+      releaseMcuAudioPrebuffer(&prebuffer);
       audioBusy = false;
       return false;
     }
-    int available = stream->available();
-    if (available <= 0) {
-      if (!stream->connected() && remaining < 0) break;
-      if (millis() - idleStarted > kMcuAudioHttpTimeoutMs) {
-        lastAudioDetail = F("audio stream timed out");
-        audioBusy = false;
-        markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
-        return false;
+    int bytesRead = 0;
+    bool fromPrebuffer = false;
+    if (prebufferOffset < prebufferLength) {
+      size_t toRead = min(kInputChunkBytes, prebufferLength - prebufferOffset);
+      memcpy(input + pendingBytes, prebuffer + prebufferOffset, toRead);
+      prebufferOffset += toRead;
+      bytesRead = static_cast<int>(toRead);
+      fromPrebuffer = true;
+      if (prebufferOffset >= prebufferLength) releaseMcuAudioPrebuffer(&prebuffer);
+    } else {
+      int available = stream->available();
+      if (available <= 0) {
+        if (!stream->connected() && remaining < 0) break;
+        if (millis() - idleStarted > kMcuAudioHttpTimeoutMs) {
+          lastAudioDetail = F("audio stream timed out");
+          releaseMcuAudioPrebuffer(&prebuffer);
+          audioBusy = false;
+          markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
+          return false;
+        }
+        delay(10);
+        yield();
+        continue;
       }
-      delay(10);
-      yield();
-      continue;
-    }
-    idleStarted = millis();
+      idleStarted = millis();
 
-    size_t toRead = min(static_cast<size_t>(available), kInputChunkBytes);
-    if (remaining > 0) toRead = min(toRead, static_cast<size_t>(remaining));
-    int bytesRead = stream->readBytes(input + pendingBytes, toRead);
-    if (bytesRead <= 0) continue;
+      size_t toRead = min(static_cast<size_t>(available), kInputChunkBytes);
+      if (remaining > 0) toRead = min(toRead, static_cast<size_t>(remaining));
+      bytesRead = stream->readBytes(input + pendingBytes, toRead);
+      if (bytesRead <= 0) continue;
+    }
+
+
     streamBytes += static_cast<uint32_t>(bytesRead);
 
     size_t bufferedBytes = pendingBytes + static_cast<size_t>(bytesRead);
     size_t alignedBytes = bufferedBytes - (bufferedBytes % kMonoFrameBytes);
-    if (remaining > 0) remaining -= bytesRead;
+    if (!fromPrebuffer && remaining > 0) remaining -= bytesRead;
     if (alignedBytes == 0) {
       pendingBytes = bufferedBytes;
       continue;
@@ -2785,6 +3158,7 @@ bool playPcmMonoStream(WiFiClient *stream, int contentLength, uint32_t sampleRat
     esp_err_t err = i2s_write(kI2sPort, stereo, bytesToWrite, &written, pdMS_TO_TICKS(1000));
     if (err != ESP_OK || written != bytesToWrite) {
       lastAudioDetail = String(F("I2S mono write failed err=")) + String(static_cast<int>(err));
+      releaseMcuAudioPrebuffer(&prebuffer);
       audioBusy = false;
       markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
       return false;
@@ -2808,6 +3182,7 @@ bool playPcmMonoStream(WiFiClient *stream, int contentLength, uint32_t sampleRat
     esp_err_t err = i2s_write(kI2sPort, stereo, 2 * sizeof(int16_t), &written, pdMS_TO_TICKS(1000));
     if (err != ESP_OK || written != 2 * sizeof(int16_t)) {
       lastAudioDetail = String(F("I2S mono final write failed err=")) + String(static_cast<int>(err));
+      releaseMcuAudioPrebuffer(&prebuffer);
       audioBusy = false;
       markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
       return false;
@@ -2815,12 +3190,247 @@ bool playPcmMonoStream(WiFiClient *stream, int contentLength, uint32_t sampleRat
     playedBytes += written;
   }
 
+  releaseMcuAudioPrebuffer(&prebuffer);
+  drainI2sPlayback(playedBytes, 2, sampleRate);
   i2s_zero_dma_buffer(kI2sPort);
   lastAudioAtMs = millis();
   lastAudioDetail = String(F("mono pcm played bytes=")) + String(playedBytes) +
                     F(", stream bytes=") + String(streamBytes) +
                     F(", rate=") + String(sampleRate) +
                     F(", padded=") + String(paddedBytes);
+  audioBusy = false;
+  return playedBytes > 0;
+}
+
+const int kImaAdpcmIndexTable[16] = {
+  -1, -1, -1, -1, 2, 4, 6, 8,
+  -1, -1, -1, -1, 2, 4, 6, 8,
+};
+
+const int kImaAdpcmStepTable[89] = {
+  7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+  19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+  50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+  130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+  337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+  876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+  2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+  5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+  15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+};
+
+uint16_t readLe16(const uint8_t *data) {
+  return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
+}
+
+uint32_t readLe32(const uint8_t *data) {
+  return static_cast<uint32_t>(data[0]) |
+         (static_cast<uint32_t>(data[1]) << 8) |
+         (static_cast<uint32_t>(data[2]) << 16) |
+         (static_cast<uint32_t>(data[3]) << 24);
+}
+
+int16_t decodeImaAdpcmNibble(uint8_t nibble, int *predictor, int *index) {
+  int step = kImaAdpcmStepTable[*index];
+  int diff = step >> 3;
+  if (nibble & 1) diff += step >> 2;
+  if (nibble & 2) diff += step >> 1;
+  if (nibble & 4) diff += step;
+
+  if (nibble & 8) {
+    *predictor -= diff;
+  } else {
+    *predictor += diff;
+  }
+  if (*predictor > 32767) *predictor = 32767;
+  if (*predictor < -32768) *predictor = -32768;
+
+  *index += kImaAdpcmIndexTable[nibble & 0x0f];
+  if (*index < 0) *index = 0;
+  if (*index > 88) *index = 88;
+  return static_cast<int16_t>(*predictor);
+}
+
+bool flushAdpcmStereo(int16_t *stereo, size_t *frames, uint32_t *playedBytes) {
+  if (!stereo || !frames || !playedBytes || *frames == 0) return true;
+  size_t bytesToWrite = *frames * 2 * sizeof(int16_t);
+  size_t written = 0;
+  esp_err_t err = i2s_write(kI2sPort, stereo, bytesToWrite, &written, pdMS_TO_TICKS(1000));
+  if (err != ESP_OK || written != bytesToWrite) {
+    lastAudioDetail = String(F("I2S adpcm write failed err=")) + String(static_cast<int>(err));
+    markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
+    return false;
+  }
+  *playedBytes += written;
+  *frames = 0;
+  mcuSocketLoop();
+  yield();
+  return true;
+}
+
+bool pushAdpcmSample(int16_t sample, int16_t *stereo, size_t *frames, uint32_t *playedBytes) {
+  int16_t shaped = shapeOutputSample(sample);
+  stereo[*frames * 2] = shaped;
+  stereo[*frames * 2 + 1] = shaped;
+  *frames += 1;
+  if (*frames >= kMcuAdpcmOutputFrames) {
+    return flushAdpcmStereo(stereo, frames, playedBytes);
+  }
+  return true;
+}
+
+bool readExactAudioBytes(WiFiClient *stream, uint8_t *buffer, size_t length, int *remaining) {
+  if (!stream || !buffer || !remaining) return false;
+  size_t offset = 0;
+  uint32_t idleStarted = millis();
+  while (offset < length) {
+    if (shouldInterruptAudioForVoice()) {
+      lastAudioDetail = F("audio interrupted by listen");
+      return false;
+    }
+    int available = stream->available();
+    if (available <= 0) {
+      if (!stream->connected() && *remaining < 0) break;
+      if (millis() - idleStarted > kMcuAudioHttpTimeoutMs) {
+        lastAudioDetail = F("audio header timed out");
+        return false;
+      }
+      delay(10);
+      mcuSocketLoop();
+      yield();
+      continue;
+    }
+    size_t toRead = min(static_cast<size_t>(available), length - offset);
+    if (*remaining > 0) toRead = min(toRead, static_cast<size_t>(*remaining));
+    int bytesRead = stream->readBytes(buffer + offset, toRead);
+    if (bytesRead <= 0) continue;
+    offset += static_cast<size_t>(bytesRead);
+    if (*remaining > 0) *remaining -= bytesRead;
+    idleStarted = millis();
+    yield();
+  }
+  return offset == length;
+}
+
+bool playAdpcmStream(WiFiClient *stream, int contentLength, uint32_t fallbackSampleRate) {
+  if (!stream || audioBusy || !i2sReady || !es8311Ready) {
+    lastAudioDetail = F("adpcm stream is not ready");
+    markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
+    return false;
+  }
+
+  int remaining = contentLength;
+  uint8_t header[kMcuAdpcmHeaderBytes] = {};
+  if (!readExactAudioBytes(stream, header, kMcuAdpcmHeaderBytes, &remaining)) {
+    markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail.length() ? lastAudioDetail : String(F("bad adpcm header")));
+    return false;
+  }
+  if (memcmp(header, "HADP", 4) != 0 || header[4] != 1 || header[5] != 1) {
+    lastAudioDetail = F("bad adpcm header");
+    Serial.printf("ADPCM bad header magic=%02x%02x%02x%02x version=%u channels=%u contentLength=%d heap=%lu\n",
+                  header[0], header[1], header[2], header[3], header[4], header[5], contentLength,
+                  static_cast<unsigned long>(ESP.getFreeHeap()));
+    markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
+    return false;
+  }
+
+  uint32_t sampleRate = readLe32(header + 8);
+  if (sampleRate == 0) sampleRate = fallbackSampleRate > 0 ? fallbackSampleRate : kMcuAudioDefaultSampleRate;
+  uint32_t sampleCount = readLe32(header + 12);
+  int predictor = static_cast<int16_t>(readLe16(header + 16));
+  int index = header[18];
+  if (index < 0) index = 0;
+  if (index > 88) index = 88;
+  Serial.printf("ADPCM start contentLength=%d remaining=%d rate=%lu samples=%lu predictor=%d index=%d heap=%lu\n",
+                contentLength, remaining, static_cast<unsigned long>(sampleRate),
+                static_cast<unsigned long>(sampleCount), predictor, index,
+                static_cast<unsigned long>(ESP.getFreeHeap()));
+
+  audioBusy = true;
+  setPowerAmp(true);
+  es8311UpdateBits(0x31, 0x60, 0x00);
+  setI2sSampleRate(sampleRate);
+
+  uint8_t *input = mcuAdpcmInputBuffer;
+  int16_t *stereo = mcuAdpcmStereoBuffer;
+  size_t frames = 0;
+  uint32_t streamBytes = kMcuAdpcmHeaderBytes;
+  uint32_t playedBytes = 0;
+  uint32_t decodedSamples = 0;
+  uint32_t idleStarted = millis();
+
+  if (sampleCount > 0) {
+    if (!pushAdpcmSample(static_cast<int16_t>(predictor), stereo, &frames, &playedBytes)) {
+      audioBusy = false;
+      return false;
+    }
+    decodedSamples = 1;
+  }
+
+  while ((remaining != 0) && (sampleCount == 0 || decodedSamples < sampleCount)) {
+    if (shouldInterruptAudioForVoice()) {
+      lastAudioDetail = F("audio interrupted by listen");
+      audioBusy = false;
+      return false;
+    }
+    int available = stream->available();
+    if (available <= 0) {
+      if (!stream->connected() && remaining < 0) break;
+      if (millis() - idleStarted > kMcuAudioHttpTimeoutMs) {
+        lastAudioDetail = F("adpcm stream timed out");
+        audioBusy = false;
+        Serial.printf("ADPCM timeout remaining=%d streamBytes=%lu decoded=%lu heap=%lu\n",
+                      remaining, static_cast<unsigned long>(streamBytes),
+                      static_cast<unsigned long>(decodedSamples),
+                      static_cast<unsigned long>(ESP.getFreeHeap()));
+        markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
+        return false;
+      }
+      delay(10);
+      mcuSocketLoop();
+      yield();
+      continue;
+    }
+
+    size_t toRead = min(static_cast<size_t>(available), kMcuAdpcmReadChunkBytes);
+    if (remaining > 0) toRead = min(toRead, static_cast<size_t>(remaining));
+    int bytesRead = stream->readBytes(input, toRead);
+    if (bytesRead <= 0) continue;
+    if (remaining > 0) remaining -= bytesRead;
+    streamBytes += static_cast<uint32_t>(bytesRead);
+    idleStarted = millis();
+
+    for (int i = 0; i < bytesRead; ++i) {
+      uint8_t byte = input[i];
+      for (int half = 0; half < 2; ++half) {
+        if (sampleCount > 0 && decodedSamples >= sampleCount) break;
+        uint8_t nibble = half == 0 ? (byte & 0x0f) : (byte >> 4);
+        int16_t sample = decodeImaAdpcmNibble(nibble, &predictor, &index);
+        if (!pushAdpcmSample(sample, stereo, &frames, &playedBytes)) {
+          audioBusy = false;
+          return false;
+        }
+        decodedSamples += 1;
+      }
+    }
+    yield();
+  }
+
+  if (!flushAdpcmStereo(stereo, &frames, &playedBytes)) {
+    audioBusy = false;
+    return false;
+  }
+  drainI2sPlayback(playedBytes, 2, sampleRate);
+  i2s_zero_dma_buffer(kI2sPort);
+  lastAudioAtMs = millis();
+  lastAudioDetail = String(F("adpcm played bytes=")) + String(playedBytes) +
+                    F(", stream bytes=") + String(streamBytes) +
+                    F(", samples=") + String(decodedSamples) +
+                    F(", rate=") + String(sampleRate);
+  Serial.printf("ADPCM done playedBytes=%lu streamBytes=%lu decoded=%lu rate=%lu heap=%lu min_heap=%lu\n",
+                static_cast<unsigned long>(playedBytes), static_cast<unsigned long>(streamBytes),
+                static_cast<unsigned long>(decodedSamples), static_cast<unsigned long>(sampleRate),
+                static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(ESP.getMinFreeHeap()));
   audioBusy = false;
   return playedBytes > 0;
 }
@@ -2834,7 +3444,7 @@ bool playRecordedWav(uint8_t *wav, size_t wavLen) {
   audioBusy = true;
   setPowerAmp(true);
   es8311UpdateBits(0x31, 0x60, 0x00);
-  setI2sSampleRate(kAudioSampleRate);
+  setI2sSampleRate(kVoiceInputSampleRate);
   setOledStatus(OledMode::Think, F("PLAY"), F("REC"), 0);
 
   uint32_t playedBytes = 0;
@@ -2869,6 +3479,7 @@ bool playRecordedWav(uint8_t *wav, size_t wavLen) {
     yield();
   }
 
+  drainI2sPlayback(playedBytes, 2, kVoiceInputSampleRate);
   i2s_zero_dma_buffer(kI2sPort);
   audioBusy = false;
   lastAudioAtMs = millis();
@@ -2887,17 +3498,38 @@ bool playPcmUrl(const String &url, uint8_t channels, uint32_t sampleRate) {
     return false;
   }
 
-  WiFiClient plainClient;
-  WiFiClientSecure secureClient;
-  WiFiClient *client = &plainClient;
+  bool releasedSocketForAudio = false;
+  auto releaseSocketForAudio = [&]() {
+    if (scheme == F("https") && mcuSocketRelayUrl.length() > 0 && (wsReady || mcuSocketConnected)) {
+      Serial.printf("Audio HTTPS releasing Socket.IO before playback heap=%lu\n",
+                    static_cast<unsigned long>(ESP.getFreeHeap()));
+      disconnectMcuSocketClient();
+      releasedSocketForAudio = true;
+      delay(20);
+      yield();
+    }
+  };
+  auto restoreSocketAfterAudio = [&]() {
+    if (!releasedSocketForAudio) return;
+    Serial.printf("Audio HTTPS reconnecting Socket.IO after playback heap=%lu\n",
+                  static_cast<unsigned long>(ESP.getFreeHeap()));
+    connectMcuSocketClient();
+    waitForMcuSocketReady(5000);
+  };
+
+  releaseSocketForAudio();
+  mcuAudioPlainClient.stop();
+  mcuAudioSecureClient.stop();
+  WiFiClient *client = &mcuAudioPlainClient;
   if (scheme == F("https")) {
-    secureClient.setInsecure();
-    client = &secureClient;
+    mcuAudioSecureClient.setInsecure();
+    client = &mcuAudioSecureClient;
   }
   client->setTimeout(kMcuAudioHttpTimeoutMs / 1000);
   if (!client->connect(host.c_str(), port)) {
     lastAudioDetail = String(F("cannot connect audio host ")) + host + F(":") + String(port);
     markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
+    restoreSocketAfterAudio();
     return false;
   }
 
@@ -2905,32 +3537,41 @@ bool playPcmUrl(const String &url, uint8_t channels, uint32_t sampleRate) {
   client->print(path);
   client->print(F(" HTTP/1.1\r\nHost: "));
   client->print(host);
-  client->print(F("\r\nConnection: close\r\nAccept: audio/x-pcm,application/octet-stream,*/*\r\n\r\n"));
+  client->print(F("\r\nConnection: close\r\nAccept: audio/x-ima-adpcm,audio/x-pcm,application/octet-stream,*/*\r\n\r\n"));
 
   int statusCode = 0;
   int contentLength = -1;
   String contentType;
   if (!readHttpResponseHeaders(*client, &statusCode, &contentLength, &contentType)) {
     client->stop();
+    restoreSocketAfterAudio();
     return false;
   }
   if (statusCode < 200 || statusCode >= 300) {
     lastAudioDetail = String(F("audio HTTP ")) + statusCode;
     markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
     client->stop();
+    restoreSocketAfterAudio();
     return false;
+  }
+  uint32_t playbackRate = sampleRate > 0 ? sampleRate : kMcuAudioDefaultSampleRate;
+  if (contentType.indexOf(F("ima-adpcm")) >= 0 || contentType.indexOf(F("adpcm")) >= 0) {
+    bool ok = playAdpcmStream(client, contentLength, playbackRate);
+    client->stop();
+    restoreSocketAfterAudio();
+    return ok;
   }
   if (contentType.indexOf(F("mpeg")) >= 0 || contentType.indexOf(F("mp3")) >= 0) {
     lastAudioDetail = F("mp3 is not supported on MCU; send 24k PCM");
     markMcuInteraction(mcuInteractionId, F("failed"), lastAudioDetail);
     client->stop();
+    restoreSocketAfterAudio();
     return false;
   }
-
-  uint32_t playbackRate = sampleRate > 0 ? sampleRate : kMcuAudioDefaultSampleRate;
   bool ok = channels == 1 ? playPcmMonoStream(client, contentLength, playbackRate)
                           : playPcmStereoStream(client, contentLength, playbackRate);
   client->stop();
+  restoreSocketAfterAudio();
   return ok;
 }
 
@@ -3198,7 +3839,7 @@ void clearMcuSessionByButton() {
     broadcastMcuStatus();
     return;
   }
-  markMcuInteraction(interactionId, F("thinking"), F("SESSION CLEAR"));
+  markMcuInteraction(interactionId, F("clearing"), F("SESSION CLEAR"));
   broadcastMcuStatus();
 }
 
@@ -3530,7 +4171,7 @@ bool broadcastMcuVoiceStreamStart(const String &interactionId) {
   json += F("{\"type\":\"voice.stream.start\",\"interactionId\":\"");
   json += escapeJson(interactionId);
   json += F("\",\"mimeType\":\"audio/pcm\",\"sampleRate\":");
-  json += kAudioSampleRate;
+  json += kVoiceInputSampleRate;
   json += F(",\"channels\":1,\"bitsPerSample\":16,\"profile\":\"");
   json += escapeJson(selectedProfile);
   json += F("\"}");
@@ -3555,6 +4196,20 @@ bool broadcastMcuVoiceStreamEnd(const String &interactionId, uint32_t dataBytes)
   return sendMcuSocketJson(json);
 }
 
+bool broadcastMcuVoiceStreamAbort(const String &interactionId, const String &reason, uint32_t dataBytes) {
+  if (!wsReady || !mcuSocketNamespaceReady) return false;
+  String json;
+  json.reserve(340);
+  json += F("{\"type\":\"voice.stream.abort\",\"interactionId\":\"");
+  json += escapeJson(interactionId);
+  json += F("\",\"bytes\":");
+  json += dataBytes;
+  json += F(",\"reason\":\"");
+  json += escapeJson(reason);
+  json += F("\"}");
+  return sendMcuSocketJson(json);
+}
+
 bool broadcastMcuVoiceStreamChunk(const String &interactionId, const uint8_t *data, size_t length, uint32_t offset) {
   if (!wsReady || !mcuSocketNamespaceReady || !data || length == 0) {
     Serial.printf("Voice stream chunk blocked ws=%d namespace=%d data=%d len=%u offset=%lu\n",
@@ -3562,28 +4217,29 @@ bool broadcastMcuVoiceStreamChunk(const String &interactionId, const uint8_t *da
                   static_cast<unsigned>(length), static_cast<unsigned long>(offset));
     return false;
   }
-  String encoded = base64Encode(data, length);
-  if (encoded.length() == 0) {
-    Serial.printf("Voice stream chunk base64 failed len=%u offset=%lu heap=%lu\n",
-                  static_cast<unsigned>(length), static_cast<unsigned long>(offset),
-                  static_cast<unsigned long>(ESP.getFreeHeap()));
-    return false;
+  String payload;
+  payload.reserve(300 + mcuAuthToken.length());
+  payload += F("451-/global-agent,[\"voice.stream.chunk\",{\"type\":\"voice.stream.chunk\",\"interactionId\":\"");
+  payload += escapeJson(interactionId);
+  payload += F("\",\"apiToken\":\"");
+  payload += escapeJson(mcuAuthToken);
+  payload += F("\",\"offset\":");
+  payload += offset;
+  payload += F(",\"bytes\":");
+  payload += length;
+  payload += F(",\"data\":{\"_placeholder\":true,\"num\":0}}]");
+  uint32_t sendStartedAt = millis();
+  bool sent = sendRawWsText(payload) && sendRawWsFrame(0x2, data, length);
+  uint32_t sendMs = millis() - sendStartedAt;
+  if (sendMs > 25 || (offset % (kVoiceStreamChunkFrames * sizeof(int16_t) * 8UL)) == 0) {
+    Serial.printf("Voice stream binary send offset=%lu len=%u ms=%lu heap=%lu min_heap=%lu\n",
+                  static_cast<unsigned long>(offset), static_cast<unsigned>(length),
+                  static_cast<unsigned long>(sendMs), static_cast<unsigned long>(ESP.getFreeHeap()),
+                  static_cast<unsigned long>(ESP.getMinFreeHeap()));
   }
-  String json;
-  json.reserve(encoded.length() + 260);
-  json += F("{\"type\":\"voice.stream.chunk\",\"interactionId\":\"");
-  json += escapeJson(interactionId);
-  json += F("\",\"offset\":");
-  json += offset;
-  json += F(",\"bytes\":");
-  json += length;
-  json += F(",\"data\":\"");
-  json += encoded;
-  json += F("\"}");
-  bool sent = sendMcuSocketJson(json);
   if (!sent) {
-    Serial.printf("Voice stream chunk send failed len=%u encoded=%u offset=%lu heap=%lu ws=%d namespace=%d\n",
-                  static_cast<unsigned>(length), static_cast<unsigned>(encoded.length()),
+    Serial.printf("Voice stream binary chunk send failed len=%u offset=%lu heap=%lu ws=%d namespace=%d\n",
+                  static_cast<unsigned>(length),
                   static_cast<unsigned long>(offset), static_cast<unsigned long>(ESP.getFreeHeap()),
                   wsReady ? 1 : 0, mcuSocketNamespaceReady ? 1 : 0);
   }
@@ -3611,14 +4267,12 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
   audioBusy = true;
   setPowerAmp(false);
   es8311UpdateBits(0x31, 0x60, 0x60);
-  setI2sSampleRate(kAudioSampleRate);
+  setI2sSampleRate(kVoiceInputSampleRate);
   i2s_zero_dma_buffer(kI2sPort);
   setOledStatus(OledMode::Think, F("LISTEN"), F("SAY NOW"), 0);
 
   constexpr size_t kReadBytes = 512;
-  constexpr size_t kPcmChunkFrames = 512;
   uint8_t readBuffer[kReadBytes];
-  int16_t pcmChunk[kPcmChunkFrames];
   size_t pcmChunkFrames = 0;
   uint32_t framesDone = 0;
   uint32_t emptyReads = 0;
@@ -3627,26 +4281,43 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
   uint16_t monoPeak = 0;
   uint64_t monoSquares = 0;
   uint32_t activeSamples = 0;
-  uint32_t sentBytes = 0;
+  uint32_t queuedBytes = 0;
+  auto abortVoiceStream = [&](const String &reason) {
+    broadcastMcuVoiceStreamAbort(interactionId, reason, queuedBytes);
+  };
+  VoiceStreamChunk *pcmChunk = static_cast<VoiceStreamChunk *>(malloc(sizeof(VoiceStreamChunk)));
+  if (!pcmChunk) {
+    audioBusy = false;
+    lastAudioDetail = String(F("voice stream chunk alloc failed heap=")) + String(ESP.getFreeHeap());
+    abortVoiceStream(F("chunk_alloc"));
+    setOledStatus(OledMode::Error, F("VOICE"), F("MEMORY"), 0);
+    return false;
+  }
+  memset(pcmChunk, 0, sizeof(VoiceStreamChunk));
   const char *stopReason = "max";
+  Serial.printf("Voice stream direct mode chunkFrames=%u heap=%lu\n",
+                static_cast<unsigned>(kVoiceStreamChunkFrames),
+                static_cast<unsigned long>(ESP.getFreeHeap()));
   voiceRecordHeardSpeech = false;
   voiceRecordRms = 0;
   voiceRecordPeak = 0;
   voiceRecordActiveSamples = 0;
-  const uint32_t maxFrames = (kAudioSampleRate * kVoiceStreamRecordMs) / 1000UL;
+  const uint32_t maxFrames = (kVoiceInputSampleRate * kVoiceStreamRecordMs) / 1000UL;
   const uint32_t startedAt = millis();
   uint32_t releaseStartedAt = 0;
   uint32_t lastRecordOledAtMs = startedAt;
   uint8_t lastRecordProgress = 0;
 
-  auto flushPcmChunk = [&]() -> bool {
+  auto queuePcmChunk = [&]() -> bool {
     if (pcmChunkFrames == 0) return true;
     size_t bytes = pcmChunkFrames * sizeof(int16_t);
-    uint32_t offset = sentBytes;
-    if (!broadcastMcuVoiceStreamChunk(interactionId, reinterpret_cast<const uint8_t *>(pcmChunk), bytes, offset)) {
+    if (!broadcastMcuVoiceStreamChunk(interactionId,
+                                      reinterpret_cast<const uint8_t *>(pcmChunk->samples),
+                                      bytes,
+                                      queuedBytes)) {
       return false;
     }
-    sentBytes += static_cast<uint32_t>(bytes);
+    queuedBytes += static_cast<uint32_t>(bytes);
     pcmChunkFrames = 0;
     return true;
   };
@@ -3659,10 +4330,10 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
                         F(", empty=") + String(emptyReads);
       break;
     }
-    if (framesDone > 0 && loopNow - startedAt > kBootDebounceMs) {
+    if (framesDone > 0 && loopNow - startedAt > kVoiceRecordMinMs) {
       if (digitalRead(kPinBoot) != LOW) {
         if (releaseStartedAt == 0) releaseStartedAt = loopNow;
-        if (loopNow - releaseStartedAt >= kBootDebounceMs) {
+        if (loopNow - releaseStartedAt >= kVoiceStreamReleaseDebounceMs) {
           stopReason = "release";
           break;
         }
@@ -3674,8 +4345,10 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
     esp_err_t err = i2s_read(kI2sPort, readBuffer, sizeof(readBuffer), &bytesRead, pdMS_TO_TICKS(40));
     if (err != ESP_OK) {
       audioBusy = false;
+      free(pcmChunk);
       lastAudioDetail = String(F("I2S stream read failed err=")) + String(static_cast<int>(err));
       setOledStatus(OledMode::Error, F("I2S"), F("READ FAIL"), 0);
+      abortVoiceStream(F("i2s_read"));
       return false;
     }
     if (bytesRead == 0) {
@@ -3700,12 +4373,14 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
       if (monoMag > monoPeak) monoPeak = monoMag;
       monoSquares += static_cast<uint64_t>(monoMag) * static_cast<uint64_t>(monoMag);
       if (monoMag >= kVoiceVadActiveThreshold) ++activeSamples;
-      pcmChunk[pcmChunkFrames++] = mono;
+      pcmChunk->samples[pcmChunkFrames++] = mono;
       ++framesDone;
 
-      if (pcmChunkFrames >= kPcmChunkFrames && !flushPcmChunk()) {
+      if (pcmChunkFrames >= kVoiceStreamChunkFrames && !queuePcmChunk()) {
         audioBusy = false;
+        free(pcmChunk);
         lastAudioDetail = F("voice stream chunk send failed");
+        abortVoiceStream(F("chunk_send"));
         return false;
       }
     }
@@ -3720,15 +4395,19 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
     yield();
   }
 
-  if (!flushPcmChunk()) {
+  if (!queuePcmChunk()) {
     audioBusy = false;
+    free(pcmChunk);
     lastAudioDetail = F("voice stream final send failed");
+    abortVoiceStream(F("final_send"));
     return false;
   }
 
   audioBusy = false;
-  if (sentBytes == 0) {
+  free(pcmChunk);
+  if (queuedBytes == 0) {
     lastAudioDetail = String(F("voice stream empty, i2s empty reads=")) + String(emptyReads);
+    abortVoiceStream(F("empty"));
     setOledStatus(OledMode::Error, F("MIC"), F("NO DATA"), 0);
     return false;
   }
@@ -3739,16 +4418,16 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
   voiceRecordHeardSpeech = voiceRecordRms >= kVoiceVadRmsStart &&
                             voiceRecordPeak >= kVoiceVadPeakStart &&
                             voiceRecordActiveSamples >= kVoiceVadMinActiveSamples;
-  lastAudioDetail = String(F("voice pcm bytes=")) + String(sentBytes) +
+  lastAudioDetail = String(F("voice pcm bytes=")) + String(queuedBytes) +
                     F(", frames=") + String(framesDone) +
                     F(", rms=") + String(voiceRecordRms) +
                     F(", peak=") + String(voiceRecordPeak) +
                     F(", active=") + String(voiceRecordActiveSamples);
   Serial.printf("Voice stream frames=%lu bytes=%lu stop=%s peak L/R/M=%u/%u/%u rms=%lu active=%lu vad=%s\n",
-                static_cast<unsigned long>(framesDone), static_cast<unsigned long>(sentBytes), stopReason,
+                static_cast<unsigned long>(framesDone), static_cast<unsigned long>(queuedBytes), stopReason,
                 leftPeak, rightPeak, monoPeak, static_cast<unsigned long>(voiceRecordRms),
                 static_cast<unsigned long>(voiceRecordActiveSamples), voiceRecordHeardSpeech ? "true" : "false");
-  broadcastMcuVoiceStreamEnd(interactionId, sentBytes);
+  broadcastMcuVoiceStreamEnd(interactionId, queuedBytes);
   return true;
 }
 
@@ -3904,6 +4583,7 @@ void triggerBootRecordPlaybackTest() {
   markMcuInteraction(interactionId, F("speaking"), F("PLAY REC"));
   broadcastMcuStatus();
   bool played = playRecordedWav(wav, wavLen);
+  free(wav);
   markMcuInteraction(interactionId, played ? F("completed") : F("failed"),
                      played ? String(F("")) : String(F("playback failed")));
   broadcastMcuStatus();
@@ -3987,10 +4667,15 @@ void handleBootButton() {
 }
 
 String mcuSocketAuthJson() {
+  String deviceCode = mcuDeviceCode();
   String json;
-  json.reserve(mcuAuthToken.length() + selectedProfile.length() + 180);
+  json.reserve(mcuAuthToken.length() + selectedProfile.length() + deviceCode.length() * 2 + 220);
   json += F("{\"token\":\"");
   json += escapeJson(mcuAuthToken);
+  json += F("\",\"deviceCode\":\"");
+  json += escapeJson(deviceCode);
+  json += F("\",\"device_code\":\"");
+  json += escapeJson(deviceCode);
   json += F("\",\"role\":\"hermes-studio\",\"instanceId\":\"");
   json += escapeJson(deviceId());
   json += F("\",\"profile\":\"");
@@ -4095,6 +4780,20 @@ void handleSocketIoText(const String &message) {
     String json;
     if (parseSocketIoEvent(message, &event, &json)) {
       Serial.printf("Socket.IO event %s %s\n", event.c_str(), json.c_str());
+      if (event == F("relay.replaced") || jsonStringValue(json, F("type")) == F("relay.replaced")) {
+        mcuSocketReconnectBlocked = true;
+        prefs.begin("mcu", false);
+        prefs.putBool("relay_replaced", true);
+        prefs.end();
+        lastAudioDetail = F("远程连接已被其他设备接管");
+        setOledStatus(OledMode::Error, F("SOCKET"), F("REPLACED"), 0);
+        return;
+      }
+      if (event == F("relay.auth.ok") || jsonStringValue(json, F("type")) == F("relay.auth.ok")) {
+        String machineList = jsonObjectValue(json, F("machineList"));
+        mcuRemoteDiscoveryToken = jsonStringValue(machineList, F("token"));
+        return;
+      }
       handleMcuWebSocketText(0, json);
     }
     return;
@@ -4105,9 +4804,9 @@ bool readMcuWsBytes(uint8_t *buffer, size_t length, uint32_t timeoutMs = 100) {
   size_t read = 0;
   uint32_t startedAt = millis();
   while (read < length && millis() - startedAt < timeoutMs) {
-    int available = mcuWsClient.available();
+    int available = mcuWsClient->available();
     if (available > 0) {
-      int n = mcuWsClient.read(buffer + read, min(static_cast<size_t>(available), length - read));
+      int n = mcuWsClient->read(buffer + read, min(static_cast<size_t>(available), length - read));
       if (n > 0) read += static_cast<size_t>(n);
     } else {
       delay(1);
@@ -4118,7 +4817,7 @@ bool readMcuWsBytes(uint8_t *buffer, size_t length, uint32_t timeoutMs = 100) {
 }
 
 void closeMcuSocketTransport(const __FlashStringHelper *reason) {
-  if (mcuWsClient.connected()) mcuWsClient.stop();
+  if (mcuWsClient->connected()) mcuWsClient->stop();
   wsReady = false;
   mcuSocketConnected = false;
   mcuSocketNamespaceReady = false;
@@ -4132,12 +4831,12 @@ void closeMcuSocketTransport(const __FlashStringHelper *reason) {
 
 void mcuSocketLoop() {
   if (!wsReady) return;
-  if (!mcuWsClient.connected()) {
+  if (!mcuWsClient->connected()) {
     closeMcuSocketTransport(F("tcp closed"));
     return;
   }
 
-  while (mcuWsClient.available() >= 2) {
+  while (mcuWsClient->available() >= 2) {
     uint8_t header[2];
     if (!readMcuWsBytes(header, 2)) return;
     uint8_t opcode = header[0] & 0x0F;
@@ -4178,11 +4877,20 @@ void mcuSocketLoop() {
 }
 
 void disconnectMcuSocketClient() {
-  if (mcuWsClient.connected()) mcuWsClient.stop();
+  if (mcuWsPlainClient.connected()) mcuWsPlainClient.stop();
+  if (mcuWsSecureClient.connected()) mcuWsSecureClient.stop();
+  mcuWsClient = &mcuWsPlainClient;
   wsReady = false;
   mcuSocketConnected = false;
   mcuSocketNamespaceReady = false;
   mcuSocketTargetKey = "";
+}
+
+String activeMcuSocketUrl() {
+  String url = mcuSocketRelayUrl;
+  url.trim();
+  if (url.length() > 0) return url;
+  return activeDeviceUrl;
 }
 
 void connectMcuSocketClient() {
@@ -4190,12 +4898,17 @@ void connectMcuSocketClient() {
     disconnectMcuSocketClient();
     return;
   }
+  if (mcuSocketReconnectBlocked && mcuSocketRelayUrl.length() > 0) {
+    Serial.println(F("Socket.IO reconnect blocked after relay replacement"));
+    return;
+  }
 
   String scheme;
   String host;
   uint16_t port = 0;
   String path;
-  if (!parseAudioUrl(activeDeviceUrl, &scheme, &host, &port, &path)) {
+  String socketUrl = activeMcuSocketUrl();
+  if (!parseAudioUrl(socketUrl, &scheme, &host, &port, &path)) {
     disconnectMcuSocketClient();
     return;
   }
@@ -4204,15 +4917,23 @@ void connectMcuSocketClient() {
   if (wsReady && mcuSocketTargetKey == targetKey) return;
   disconnectMcuSocketClient();
 
-  if (scheme != F("http")) {
+  if (scheme != F("http") && scheme != F("https")) {
     Serial.printf("Socket.IO client unsupported scheme=%s\n", scheme.c_str());
     return;
   }
 
-  if (!mcuWsClient.connect(host.c_str(), port, 5000)) {
+  if (scheme == F("https")) {
+    mcuWsSecureClient.setInsecure();
+    mcuWsClient = &mcuWsSecureClient;
+  } else {
+    mcuWsClient = &mcuWsPlainClient;
+  }
+  mcuWsClient->setTimeout(5);
+  if (!mcuWsClient->connect(host.c_str(), port, 5000)) {
     Serial.printf("Socket.IO tcp connect failed host=%s port=%u\n", host.c_str(), port);
     return;
   }
+  mcuWsClient->setNoDelay(true);
 
   String socketPath = F("/socket.io/?EIO=4&transport=websocket");
   String key = F("dGhlIHNhbXBsZSBub25jZQ==");
@@ -4227,18 +4948,18 @@ void connectMcuSocketClient() {
   request += F("\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ");
   request += key;
   request += F("\r\nUser-Agent: HStudio-ESP32C3\r\n\r\n");
-  mcuWsClient.print(request);
+  mcuWsClient->print(request);
 
-  String statusLine = mcuWsClient.readStringUntil('\n');
+  String statusLine = mcuWsClient->readStringUntil('\n');
   statusLine.trim();
   if (!statusLine.startsWith(F("HTTP/1.1 101")) && !statusLine.startsWith(F("HTTP/1.0 101"))) {
     Serial.printf("Socket.IO websocket upgrade failed: %s\n", statusLine.c_str());
-    mcuWsClient.stop();
+    mcuWsClient->stop();
     return;
   }
   uint32_t headerStartedAt = millis();
-  while (mcuWsClient.connected() && millis() - headerStartedAt < 3000) {
-    String line = mcuWsClient.readStringUntil('\n');
+  while (mcuWsClient->connected() && millis() - headerStartedAt < 3000) {
+    String line = mcuWsClient->readStringUntil('\n');
     line.trim();
     if (line.length() == 0) break;
   }
@@ -4247,8 +4968,8 @@ void connectMcuSocketClient() {
   mcuSocketNamespaceReady = false;
   mcuSocketTargetKey = targetKey;
   lastMcuSocketConnectAtMs = millis();
-  Serial.printf("Socket.IO client connecting host=%s port=%u profile=%s\n",
-                host.c_str(), port, selectedProfile.c_str());
+  Serial.printf("Socket.IO client connecting host=%s port=%u profile=%s relay=%d\n",
+                host.c_str(), port, selectedProfile.c_str(), mcuSocketRelayUrl.length() > 0 ? 1 : 0);
   mcuSocketLoop();
 }
 
@@ -4326,11 +5047,18 @@ void saveWifi() {
     server.send(400, F("text/plain; charset=utf-8"), F("缺少 SSID"));
     return;
   }
-  prefs.begin("net", false);
-  prefs.putString("ssid", ssid);
-  prefs.putString("pass", pass);
-  prefs.end();
+
+  String savedSsid = prefString("ssid");
+  String savedPass = prefString("pass");
+  if (pass.length() == 0 && ssid == savedSsid) {
+    pass = savedPass;
+  }
+
   if (connectWifiCredentials(ssid, pass, WIFI_AP_STA)) {
+    prefs.begin("net", false);
+    prefs.putString("ssid", ssid);
+    prefs.putString("pass", pass);
+    prefs.end();
     sendConnectSuccessPage(ssid, WiFi.localIP());
     restartPending = true;
     restartAtMs = millis() + kProvisionRestartDelayMs;
@@ -4534,7 +5262,9 @@ void setup() {
   pendingProfileDeviceKey = prefs.getString("last_key", "");
   activeDeviceKey = prefs.getString("active_key", "");
   activeDeviceUrl = prefs.getString("active_url", "");
+  mcuSocketRelayUrl = prefs.getString("relay_url", "");
   mcuAuthToken = prefs.getString("auth_token", "");
+  mcuSocketReconnectBlocked = prefs.getBool("relay_replaced", false);
   selectedProfile = prefs.getString("last_profile", "");
   prefs.end();
   setOledStatus(OledMode::Boot, F("BOOT"), F("WIFI ONLY"), 15);
