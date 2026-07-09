@@ -1,4 +1,4 @@
-# ESP32-S3 ESP-SparkBot Wi-Fi Setup Firmware
+# ESP32-S3 ESP-SparkBot Wi-Fi Setup Firmware v1
 
 PlatformIO source project for the ESP32-S3 Wi-Fi setup firmware, adapted for the
 [ESP-SparkBot](https://github.com/espressif2022/esp_sparkbot) hardware platform.
@@ -42,20 +42,21 @@ playback flows are retained from the C3 base.
 ## Commands
 
 ```bash
-cd packages/esp32-sparkbot
+cd packages/esp32-sparkbot/v1
 pio run
 pio run -t upload
 pio device monitor
 ```
 
-After `pio run`, the firmware is built at
-`packages/esp32-sparkbot/.pio/build/esp32-s3-devkitc-1/firmware.bin`. Copy it into
-`packages/esp32-sparkbot/release/firmware.bin` for release packaging.
+After `pio run`, run `npm run build` from the repository root to sync the
+firmware into `packages/esp32-sparkbot/release/v1/firmware.bin` and package it
+into `dist/mcu/sparkbot/v1/firmware.bin`. GitHub release builds reuse the
+checked-in release firmware and do not build ESP32 firmware in CI.
 
-The current macOS serial port is configured as:
+The current serial port is configured as:
 
 ```text
-/dev/cu.usbmodem11101
+COM4
 ```
 
 If upload fails, hold `BOOT`, start upload, then release it after flashing

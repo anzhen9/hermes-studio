@@ -83,11 +83,76 @@ describe('MCU firmware controller', () => {
       error: 'unsupported mcu firmware version',
     })
   })
+
+  it('serves a version-isolated sparkbot v1 manifest', async () => {
+    tempRoot = await makeTempRoot()
+    process.chdir(tempRoot)
+    vi.stubEnv('NODE_ENV', 'production')
+
+    const firmware = Buffer.from('sparkbot-v1')
+    await writeFile(path.join(tempRoot, 'dist/mcu/sparkbot/v1/firmware.bin'), firmware)
+    const ctrl = await import('../../packages/server/src/controllers/hermes/mcu-firmware')
+    const ctx = makeCtx({ version: 'v1' })
+
+    await ctrl.sparkbotManifest(ctx)
+
+    expect(ctx.status).toBe(200)
+    expect(ctx.set).toHaveBeenCalledWith('Cache-Control', 'no-store')
+    expect(ctx.body).toMatchObject({
+      updateAvailable: true,
+      target: 'hstudio-esp32-sparkbot',
+      channel: 'production',
+      firmwareVersion: 'v1',
+      size: firmware.length,
+      sha256: createHash('sha256').update(firmware).digest('hex'),
+      md5: createHash('md5').update(firmware).digest('hex'),
+      url: '/api/hermes/mcu/sparkbot/firmware/v1/firmware.bin',
+    })
+  })
+
+  it('keeps the unversioned sparkbot manifest pinned to v1 for already-shipped devices', async () => {
+    tempRoot = await makeTempRoot()
+    process.chdir(tempRoot)
+    vi.stubEnv('NODE_ENV', 'production')
+
+    const firmware = Buffer.from('legacy-sparkbot-v1')
+    await writeFile(path.join(tempRoot, 'dist/mcu/sparkbot/v1/firmware.bin'), firmware)
+    const ctrl = await import('../../packages/server/src/controllers/hermes/mcu-firmware')
+    const ctx = makeCtx({})
+
+    await ctrl.sparkbotLegacyManifest(ctx)
+
+    expect(ctx.status).toBe(200)
+    expect(ctx.body).toMatchObject({
+      updateAvailable: true,
+      firmwareVersion: 'v1',
+      url: '/api/hermes/mcu/sparkbot/firmware/v1/firmware.bin',
+      md5: createHash('md5').update(firmware).digest('hex'),
+    })
+  })
+
+  it('rejects unsupported sparkbot firmware versions', async () => {
+    tempRoot = await makeTempRoot()
+    process.chdir(tempRoot)
+    vi.stubEnv('NODE_ENV', 'production')
+
+    const ctrl = await import('../../packages/server/src/controllers/hermes/mcu-firmware')
+    const ctx = makeCtx({ version: 'v2' })
+
+    await ctrl.sparkbotManifest(ctx)
+
+    expect(ctx.status).toBe(404)
+    expect(ctx.body).toEqual({
+      updateAvailable: false,
+      error: 'unsupported mcu firmware version',
+    })
+  })
 })
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'mcu-firmware-'))
   await mkdir(path.join(root, 'dist/mcu/v1'), { recursive: true })
+  await mkdir(path.join(root, 'dist/mcu/sparkbot/v1'), { recursive: true })
   return root
 }
 
