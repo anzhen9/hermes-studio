@@ -17,6 +17,8 @@
 
 namespace {
 constexpr char kApName[] = "HStudio-WIFI";
+constexpr char kMcuFirmwareVersion[] = "v1";
+constexpr char kMcuFirmwareManifestPath[] = "/api/hermes/mcu/sparkbot/firmware/v1/manifest";
 constexpr uint32_t kConnectTimeoutMs = 18000;
 constexpr uint32_t kMcuOtaFirstCheckMs = 30000;
 constexpr uint32_t kMcuOtaIntervalMs = 6UL * 60UL * 60UL * 1000UL;
@@ -221,6 +223,7 @@ void mcuSocketLoop();
 bool waitForMcuSocketReady(uint32_t timeoutMs);
 void enqueueNoDevicePrompt(const String &interactionId);
 String activeDeviceEndpoint(const __FlashStringHelper *path);
+String activeDeviceEndpoint(const char *path);
 void clearActivePetDisplay();
 bool refreshActivePetDisplay(bool force = false);
 bool refreshActivePetSprite(bool force = false);
@@ -2211,7 +2214,7 @@ void sendOtaPage(const String &notice = "") {
   html += F("<h2>固件状态</h2><div class='info-grid'>");
   appendInfoRow(html, F("当前 MD5"), ESP.getSketchMD5());
   appendInfoRow(html, F("服务端"), activeDeviceUrl.length() > 0 ? activeDeviceUrl : String(F("未连接")));
-  appendInfoRow(html, F("Manifest"), activeDeviceEndpoint(F("/api/hermes/mcu/sparkbot/firmware/manifest")));
+  appendInfoRow(html, F("Manifest"), activeDeviceEndpoint(kMcuFirmwareManifestPath));
   appendInfoRow(html, F("下次自动检查"), otaNextCheckText());
   appendInfoRow(html, F("OTA 条件"), String(wifiReady && WiFi.status() == WL_CONNECTED ? F("Wi-Fi OK") : F("Wi-Fi OFF")) +
                 F(" · ") + String(mcuAuthToken.length() > 0 ? F("Token OK") : F("No Token")));
@@ -3843,7 +3846,7 @@ McuOtaResult checkMcuFirmwareUpdate(bool force, bool applyUpdate, String *outFir
     return McuOtaResult::Failed;
   }
 
-  String endpoint = activeDeviceEndpoint(F("/api/hermes/mcu/sparkbot/firmware/manifest"));
+  String endpoint = activeDeviceEndpoint(kMcuFirmwareManifestPath);
   if (endpoint.length() == 0) return McuOtaResult::Failed;
 
   HTTPClient http;
@@ -3864,7 +3867,13 @@ McuOtaResult checkMcuFirmwareUpdate(bool force, bool applyUpdate, String *outFir
 
   String md5 = jsonStringValue(body, F("md5"));
   String firmwarePath = jsonStringValue(body, F("url"));
+  String firmwareVersion = jsonStringValue(body, F("firmwareVersion"));
   int size = jsonIntValue(body, F("size"));
+  if (firmwareVersion != String(kMcuFirmwareVersion)) {
+    Serial.printf("MCU OTA firmware version mismatch current=%s manifest=%s\n",
+                  kMcuFirmwareVersion, firmwareVersion.c_str());
+    return McuOtaResult::Failed;
+  }
   if (md5.length() != 32 || firmwarePath.length() == 0 || size <= 0) {
     Serial.println(F("MCU OTA manifest missing md5/url/size"));
     return McuOtaResult::Failed;
