@@ -21,14 +21,16 @@ interface TargetConfig {
   target: string
   legacyRoute: string
   versionedRoute: (version: FirmwareVersion) => string
-  distPathByVersion?: Record<FirmwareVersion, string>
-  devPathByVersion?: Record<FirmwareVersion, string>
-  distPath?: string
-  devPath?: string
+  distPathByVersion: Record<FirmwareVersion, string>
+  devPathByVersion: Record<FirmwareVersion, string>
+  legacyDistFallback: string
 }
 
 const DEFAULT_FIRMWARE_VERSION: FirmwareVersion = 'v1'
-const SUPPORTED_C3_VERSIONS = new Set<string>([DEFAULT_FIRMWARE_VERSION])
+const SUPPORTED_VERSIONS: Record<FirmwareTarget, Set<string>> = {
+  c3: new Set<string>([DEFAULT_FIRMWARE_VERSION]),
+  sparkbot: new Set<string>([DEFAULT_FIRMWARE_VERSION]),
+}
 
 const TARGETS: Record<FirmwareTarget, TargetConfig> = {
   c3: {
@@ -41,48 +43,41 @@ const TARGETS: Record<FirmwareTarget, TargetConfig> = {
     devPathByVersion: {
       v1: resolve(process.cwd(), 'packages/esp32-c3/v1/.pio/build/esp32-c3-devkitm-1/firmware.bin'),
     },
+    legacyDistFallback: resolve(process.cwd(), 'dist', 'mcu', 'firmware.bin'),
   },
   sparkbot: {
     target: 'hstudio-esp32-sparkbot',
     legacyRoute: '/api/hermes/mcu/sparkbot/firmware.bin',
-    versionedRoute: () => '/api/hermes/mcu/sparkbot/firmware.bin',
-    distPath: resolve(process.cwd(), 'dist', 'mcu', 'sparkbot-firmware.bin'),
-    devPath: resolve(process.cwd(), 'packages/esp32-sparkbot/.pio/build/esp32-s3-devkitc-1/firmware.bin'),
+    versionedRoute: (version) => `/api/hermes/mcu/sparkbot/firmware/${version}/firmware.bin`,
+    distPathByVersion: {
+      v1: resolve(process.cwd(), 'dist', 'mcu', 'sparkbot', 'v1', 'firmware.bin'),
+    },
+    devPathByVersion: {
+      v1: resolve(process.cwd(), 'packages/esp32-sparkbot/v1/.pio/build/esp32-s3-devkitc-1/firmware.bin'),
+    },
+    legacyDistFallback: resolve(process.cwd(), 'dist', 'mcu', 'sparkbot-firmware.bin'),
   },
 }
 
-const LEGACY_C3_DIST_FALLBACK = resolve(process.cwd(), 'dist', 'mcu', 'firmware.bin')
-
-function c3VersionFromContext(ctx: Context): FirmwareVersion | null {
+function versionFromContext(ctx: Context, target: FirmwareTarget): FirmwareVersion | null {
   const version = String((ctx as FirmwareContext).params?.version || DEFAULT_FIRMWARE_VERSION)
-  return SUPPORTED_C3_VERSIONS.has(version) ? (version as FirmwareVersion) : null
-}
-
-function targetFromPath(ctx: Context): FirmwareTarget {
-  if (ctx.path.startsWith('/api/hermes/mcu/sparkbot/')) return 'sparkbot'
-  return 'c3'
+  return SUPPORTED_VERSIONS[target].has(version) ? (version as FirmwareVersion) : null
 }
 
 function sourceCandidates(target: FirmwareTarget, version?: FirmwareVersion): string[] {
   const cfg = TARGETS[target]
   const isProd = process.env.NODE_ENV === 'production'
+  const resolvedVersion = version || DEFAULT_FIRMWARE_VERSION
+  const versionPath = isProd
+    ? cfg.distPathByVersion[resolvedVersion]
+    : cfg.devPathByVersion[resolvedVersion]
+  const paths = [versionPath].filter((value): value is string => !!value)
 
-  if (target === 'c3') {
-    const resolvedVersion = version || DEFAULT_FIRMWARE_VERSION
-    const versionPath = isProd
-      ? cfg.distPathByVersion?.[resolvedVersion]
-      : cfg.devPathByVersion?.[resolvedVersion]
-    const paths = [versionPath].filter((value): value is string => !!value)
-
-    if (isProd && resolvedVersion === DEFAULT_FIRMWARE_VERSION) {
-      paths.push(LEGACY_C3_DIST_FALLBACK)
-    }
-
-    return paths
+  if (isProd && resolvedVersion === DEFAULT_FIRMWARE_VERSION) {
+    paths.push(cfg.legacyDistFallback)
   }
 
-  const targetPath = isProd ? cfg.distPath : cfg.devPath
-  return targetPath ? [targetPath] : []
+  return paths
 }
 
 async function readFirmwareInfo(
@@ -109,7 +104,7 @@ async function readFirmwareInfo(
 }
 
 async function findFirmware(target: FirmwareTarget, version?: FirmwareVersion): Promise<FirmwareInfo | null> {
-  const firmwareVersion = target === 'c3' ? (version || DEFAULT_FIRMWARE_VERSION) : 'sparkbot'
+  const firmwareVersion = version || DEFAULT_FIRMWARE_VERSION
   const channel: FirmwareInfo['channel'] = process.env.NODE_ENV === 'production' ? 'production' : 'development'
 
   for (const filePath of sourceCandidates(target, version)) {
@@ -122,7 +117,7 @@ async function findFirmware(target: FirmwareTarget, version?: FirmwareVersion): 
 
 function firmwareDownloadRoute(target: FirmwareTarget, firmwareVersion: string): string {
   const cfg = TARGETS[target]
-  if (target === 'c3' && SUPPORTED_C3_VERSIONS.has(firmwareVersion)) {
+  if (SUPPORTED_VERSIONS[target].has(firmwareVersion)) {
     return cfg.versionedRoute(firmwareVersion as FirmwareVersion)
   }
   return cfg.legacyRoute
@@ -169,7 +164,7 @@ async function sendDownload(ctx: Context, target: FirmwareTarget, version?: Firm
 }
 
 export async function manifest(ctx: Context) {
-  const version = c3VersionFromContext(ctx)
+  const version = versionFromContext(ctx, 'c3')
   if (!version) {
     ctx.status = 404
     ctx.body = { updateAvailable: false, error: 'unsupported mcu firmware version' }
@@ -179,7 +174,7 @@ export async function manifest(ctx: Context) {
 }
 
 export async function download(ctx: Context) {
-  const version = c3VersionFromContext(ctx)
+  const version = versionFromContext(ctx, 'c3')
   if (!version) {
     ctx.status = 404
     ctx.body = { error: 'unsupported mcu firmware version' }
@@ -201,17 +196,35 @@ export async function legacyDownload(ctx: Context) {
   return download(ctx)
 }
 
-export async function manifestForPath(ctx: Context) {
-  const target = targetFromPath(ctx)
-  if (target === 'c3') return legacyManifest(ctx)
-  return sendManifest(ctx, target)
+export async function sparkbotManifest(ctx: Context) {
+  const version = versionFromContext(ctx, 'sparkbot')
+  if (!version) {
+    ctx.status = 404
+    ctx.body = { updateAvailable: false, error: 'unsupported mcu firmware version' }
+    return
+  }
+  await sendManifest(ctx, 'sparkbot', version)
 }
 
-export async function downloadForPath(ctx: Context) {
-  const target = targetFromPath(ctx)
-  if (target === 'c3') {
-    ctx.set('X-Legacy-Firmware-Route', TARGETS.c3.legacyRoute)
-    return legacyDownload(ctx)
+export async function sparkbotDownload(ctx: Context) {
+  const version = versionFromContext(ctx, 'sparkbot')
+  if (!version) {
+    ctx.status = 404
+    ctx.body = { error: 'unsupported mcu firmware version' }
+    return
   }
-  return sendDownload(ctx, target)
+  await sendDownload(ctx, 'sparkbot', version)
+}
+
+export async function sparkbotLegacyManifest(ctx: Context) {
+  const firmwareCtx = ctx as FirmwareContext
+  firmwareCtx.params = { ...firmwareCtx.params, version: DEFAULT_FIRMWARE_VERSION }
+  return sparkbotManifest(ctx)
+}
+
+export async function sparkbotLegacyDownload(ctx: Context) {
+  const firmwareCtx = ctx as FirmwareContext
+  firmwareCtx.params = { ...firmwareCtx.params, version: DEFAULT_FIRMWARE_VERSION }
+  ctx.set('X-Legacy-Firmware-Route', TARGETS.sparkbot.legacyRoute)
+  return sparkbotDownload(ctx)
 }

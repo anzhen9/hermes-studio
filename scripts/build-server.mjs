@@ -75,20 +75,26 @@ if (existsSync(firmwareBuildSrc)) {
   console.warn(`[build-server] ESP32-C3 ${firmwareVersion} firmware not found, skipped dist/mcu/${firmwareVersion}/firmware.bin`)
 }
 
-// ESP-SparkBot firmware — dedicated OTA channel, packaged to dist/mcu/sparkbot-firmware.bin
-const sparkbotFirmwareBuildSrc = resolve(rootDir, 'packages/esp32-sparkbot/.pio/build/esp32-s3-devkitc-1/firmware.bin')
-const sparkbotFirmwareReleaseSrc = resolve(rootDir, 'packages/esp32-sparkbot/release/firmware.bin')
-const sparkbotFirmwareOutPath = resolve(firmwareOutDir, 'sparkbot-firmware.bin')
+// ESP-SparkBot firmware — dedicated OTA channel, versioned like ESP32-C3.
+const sparkbotFirmwareVersion = 'v1'
+const sparkbotFirmwareBuildSrc = resolve(rootDir, `packages/esp32-sparkbot/${sparkbotFirmwareVersion}/.pio/build/esp32-s3-devkitc-1/firmware.bin`)
+const sparkbotFirmwareReleaseSrc = resolve(rootDir, `packages/esp32-sparkbot/release/${sparkbotFirmwareVersion}/firmware.bin`)
+const sparkbotFirmwareOutDir = resolve(rootDir, 'dist/mcu/sparkbot')
+const sparkbotFirmwareVersionedOutDir = resolve(sparkbotFirmwareOutDir, sparkbotFirmwareVersion)
+const sparkbotFirmwareOutPath = resolve(sparkbotFirmwareVersionedOutDir, 'firmware.bin')
+const legacySparkbotFirmwareOutPath = resolve(firmwareOutDir, 'sparkbot-firmware.bin')
 if (existsSync(sparkbotFirmwareBuildSrc)) {
-  mkdirSync(firmwareOutDir, { recursive: true })
+  mkdirSync(sparkbotFirmwareVersionedOutDir, { recursive: true })
   mkdirSync(dirname(sparkbotFirmwareReleaseSrc), { recursive: true })
   cpSync(sparkbotFirmwareBuildSrc, sparkbotFirmwareReleaseSrc)
   cpSync(sparkbotFirmwareBuildSrc, sparkbotFirmwareOutPath)
-  console.log('[build-server] ESP-SparkBot firmware copied from PlatformIO build output')
+  cpSync(sparkbotFirmwareBuildSrc, legacySparkbotFirmwareOutPath)
+  console.log(`[build-server] ESP-SparkBot ${sparkbotFirmwareVersion} firmware copied from PlatformIO build output`)
 } else if (existsSync(sparkbotFirmwareReleaseSrc)) {
-  mkdirSync(firmwareOutDir, { recursive: true })
+  mkdirSync(sparkbotFirmwareVersionedOutDir, { recursive: true })
   cpSync(sparkbotFirmwareReleaseSrc, sparkbotFirmwareOutPath)
-  console.log('[build-server] ESP-SparkBot firmware copied from release artifact')
+  cpSync(sparkbotFirmwareReleaseSrc, legacySparkbotFirmwareOutPath)
+  console.log(`[build-server] ESP-SparkBot ${sparkbotFirmwareVersion} firmware copied from release artifact`)
 } else {
-  console.warn('[build-server] ESP-SparkBot firmware not found, skipped dist/mcu/sparkbot-firmware.bin')
+  console.warn(`[build-server] ESP-SparkBot ${sparkbotFirmwareVersion} firmware not found, skipped dist/mcu/sparkbot/${sparkbotFirmwareVersion}/firmware.bin`)
 }
