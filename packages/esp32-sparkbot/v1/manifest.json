@@ -2,7 +2,7 @@
   "name": "HStudio ESP-SparkBot Firmware v1",
   "firmwareVersion": "v1",
   "version": "v1-esp32-sparkbot-wifi-setup",
-  "buildDate": "2026-06-29",
+  "buildDate": "2026-07-10",
   "chip": "esp32s3",
   "flashSize": "16MB",
   "flashMode": "qio",
@@ -53,6 +53,9 @@
     "MCU login form for discovered endpoints",
     "Profile selection after MCU login",
     "Socket.IO client connection to selected Hermes Web UI",
+    "Wi-Fi history scan before startup reconnect",
+    "Wi-Fi reprovisioning without clearing history",
+    "Remote active machine reauthentication",
     "ST7789 240x240 color LCD status UI and idle animation",
     "ES8311 microphone voice recording and streaming",
     "Green LED status indicator"
