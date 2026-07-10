@@ -2422,7 +2422,7 @@ String mcuLoginPayload(const String &account, const String &password) {
   payload += escapeJson(account);
   payload += F("\",\"password\":\"");
   payload += escapeJson(password);
-  payload += F("\"}");
+  payload += F("\",\"relayMode\":\"lan\"}");
   return payload;
 }
 
@@ -3778,6 +3778,22 @@ void handleMcuWebSocketText(uint8_t clientId, const String &message) {
   if (type == F("pet.changed")) {
     Serial.println(F("Pet changed notification received, will refresh"));
     petChangePending = true;
+    return;
+  }
+  if (type == F("mcu.reauth.required")) {
+    String machineId = jsonStringValue(message, F("machineId"));
+    String reason = jsonStringValue(message, F("reason"));
+    Serial.printf("MCU reauth required reason=%s machine=%s\n", reason.c_str(), machineId.c_str());
+    setLcdStatus(LcdMode::Think, F("LOGIN"), F("REAUTH"), 35);
+    autoLoginSavedDevice();
+    broadcastMcuStatus();
+    return;
+  }
+  if (type == F("auth.invalid")) {
+    Serial.println(F("Auth invalid, attempting reauth"));
+    setLcdStatus(LcdMode::Think, F("LOGIN"), F("REAUTH"), 35);
+    autoLoginSavedDevice();
+    broadcastMcuStatus();
     return;
   }
   sendWsJson(clientId, String(F("{\"type\":\"mcu.unknown\",\"ok\":false,\"received\":\"")) +
@@ -5175,8 +5191,12 @@ bool connectSavedWifi() {
   }
 
   if (!matched) {
-    Serial.println(F("No saved WiFi SSID found in scan, entering setup AP"));
-    esp_rom_printf("No saved WiFi SSID found in scan, entering setup AP\n");
+    Serial.println(F("No saved WiFi SSID found in scan, trying direct connect"));
+    esp_rom_printf("No saved WiFi SSID found in scan, trying direct connect\n");
+    if (connectWifiCredentials(ssids[0], passes[0], WIFI_STA)) {
+      rememberWifiCredential(ssids[0], passes[0]);
+      return true;
+    }
   }
   return false;
 }
