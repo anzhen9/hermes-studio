@@ -140,7 +140,11 @@ const DEFAULT_SKIPPED_FILE_EXTENSIONS = new Set([
   '.7z',
   '.rar',
   '.sqlite',
+  '.sqlite-shm',
+  '.sqlite-wal',
   '.db',
+  '.db-shm',
+  '.db-wal',
   '.pdf',
   '.docx',
   '.xlsx',
@@ -265,7 +269,7 @@ function parseGitStatusPaths(output: string): string[] {
 function getGitStatusPaths(gitRoot: string): { paths: string[]; truncated: boolean } {
   try {
     const output = runGit(gitRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=normal'], 4 * 1024 * 1024)
-    const paths = parseGitStatusPaths(output)
+    const paths = parseGitStatusPaths(output).filter(path => !shouldSkipWorkspaceFile(path))
     return {
       paths: paths.slice(0, MAX_TRACKED_STATUS_PATHS),
       truncated: paths.length > MAX_TRACKED_STATUS_PATHS,
@@ -291,7 +295,7 @@ function shouldSkipFilesystemDir(name: string, relPath: string): boolean {
     DEFAULT_IGNORED_DIR_SUFFIXES.some(suffix => name.endsWith(suffix))
 }
 
-function shouldSkipFilesystemFile(relPath: string): boolean {
+function shouldSkipWorkspaceFile(relPath: string): boolean {
   return DEFAULT_SKIPPED_FILE_NAMES.has(basename(relPath)) ||
     DEFAULT_SKIPPED_FILE_EXTENSIONS.has(extname(relPath).toLowerCase())
 }
@@ -348,7 +352,7 @@ function scanFilesystemPaths(root: string): WorkspacePathScan {
         continue
       }
 
-      if (!entry.isFile() || shouldSkipFilesystemFile(childRelPath)) continue
+      if (!entry.isFile() || shouldSkipWorkspaceFile(childRelPath)) continue
       paths.push(childRelPath)
       if (paths.length >= MAX_TRACKED_STATUS_PATHS) {
         truncated = true
@@ -646,10 +650,10 @@ export function completeWorkspaceRunCheckpointDraft(args: {
   let totalPatchBytes = 0
   let totalAdditions = 0
   let totalDeletions = 0
-  let truncated = checkpoint.truncated || status.truncated || relPaths.size > MAX_CHANGED_FILES
+  let truncated = checkpoint.truncated || status.truncated
   let remainingSnapshotBytes = checkpoint.kind === 'filesystem' ? MAX_TOTAL_SNAPSHOT_BYTES : Number.POSITIVE_INFINITY
 
-  for (const relPath of [...relPaths].slice(0, MAX_CHANGED_FILES)) {
+  for (const relPath of relPaths) {
     const after = snapshotPath(checkpoint.root, relPath, remainingSnapshotBytes)
     if (after.content) {
       remainingSnapshotBytes -= after.content.length
@@ -669,6 +673,10 @@ export function completeWorkspaceRunCheckpointDraft(args: {
     )
     if (!comparison.changed) continue
     if (isEmptyContentOnlyChange(comparison)) continue
+    if (files.length >= MAX_CHANGED_FILES) {
+      truncated = true
+      break
+    }
     totalPatchBytes += comparison.patchBytes
     totalAdditions += comparison.additions
     totalDeletions += comparison.deletions
