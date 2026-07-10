@@ -67,6 +67,7 @@ constexpr uint32_t kActivePetStateIntervalMs = 3000;
 constexpr uint32_t kProvisionRestartDelayMs = 2500;
 constexpr uint32_t kProvisionRedirectDelayMs = 6500;
 constexpr int kMaxScannedNetworks = 20;
+constexpr int kMaxWifiHistoryNetworks = 5;
 constexpr uint16_t kLanDiscoveryLocalPort = 48630;
 constexpr uint16_t kHermesDiscoveryPort = 48640;
 constexpr uint32_t kLanDiscoveryTimeoutMs = 1200;
@@ -124,7 +125,9 @@ constexpr uint32_t kSpiFrequency = 80000000;
 Preferences prefs;
 WebServer server(80);
 WiFiUDP lanUdp;
-WiFiClient mcuWsClient;
+WiFiClient mcuWsPlainClient;
+WiFiClientSecure mcuWsSecureClient;
+WiFiClient *mcuWsClient = &mcuWsPlainClient;
 SPIClass lcdSpi(FSPI);
 uint16_t *lcdBuffer = nullptr;
 bool wifiReady = false;
@@ -863,6 +866,100 @@ String prefString(const char *key) {
   String value = prefs.getString(key, "");
   prefs.end();
   return value;
+}
+
+String wifiHistorySsidKey(int index) {
+  return String(F("ssid")) + index;
+}
+
+String wifiHistoryPassKey(int index) {
+  return String(F("pass")) + index;
+}
+
+bool appendWifiCredential(String ssids[], String passes[], int &count, String ssid, const String &pass) {
+  ssid.trim();
+  if (ssid.length() == 0) return false;
+  for (int i = 0; i < count; ++i) {
+    if (ssids[i] == ssid) return false;
+  }
+  if (count >= kMaxWifiHistoryNetworks) return false;
+  ssids[count] = ssid;
+  passes[count] = pass;
+  ++count;
+  return true;
+}
+
+void loadWifiCredentials(String ssids[], String passes[], int &count) {
+  count = 0;
+  prefs.begin("net", true);
+  appendWifiCredential(ssids, passes, count, prefs.getString("ssid", ""), prefs.getString("pass", ""));
+  for (int i = 0; i < kMaxWifiHistoryNetworks; ++i) {
+    String ssidKey = wifiHistorySsidKey(i);
+    String passKey = wifiHistoryPassKey(i);
+    appendWifiCredential(ssids, passes, count, prefs.getString(ssidKey.c_str(), ""),
+                         prefs.getString(passKey.c_str(), ""));
+  }
+  prefs.end();
+}
+
+bool savedWifiPasswordForSsid(const String &ssid, String &pass) {
+  String ssids[kMaxWifiHistoryNetworks];
+  String passes[kMaxWifiHistoryNetworks];
+  int count = 0;
+  loadWifiCredentials(ssids, passes, count);
+  for (int i = 0; i < count; ++i) {
+    if (ssids[i] == ssid) {
+      pass = passes[i];
+      return true;
+    }
+  }
+  return false;
+}
+
+void rememberWifiCredential(const String &ssid, const String &pass) {
+  if (ssid.length() == 0) return;
+
+  String storedSsids[kMaxWifiHistoryNetworks];
+  String storedPasses[kMaxWifiHistoryNetworks];
+  int storedCount = 0;
+  loadWifiCredentials(storedSsids, storedPasses, storedCount);
+
+  String ssids[kMaxWifiHistoryNetworks];
+  String passes[kMaxWifiHistoryNetworks];
+  int count = 0;
+  appendWifiCredential(ssids, passes, count, ssid, pass);
+  for (int i = 0; i < storedCount; ++i) {
+    appendWifiCredential(ssids, passes, count, storedSsids[i], storedPasses[i]);
+  }
+
+  prefs.begin("net", false);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  for (int i = 0; i < kMaxWifiHistoryNetworks; ++i) {
+    String ssidKey = wifiHistorySsidKey(i);
+    String passKey = wifiHistoryPassKey(i);
+    if (i < count) {
+      prefs.putString(ssidKey.c_str(), ssids[i]);
+      prefs.putString(passKey.c_str(), passes[i]);
+    } else {
+      prefs.remove(ssidKey.c_str());
+      prefs.remove(passKey.c_str());
+    }
+  }
+  prefs.end();
+}
+
+void forgetAllWifiCredentials() {
+  prefs.begin("net", false);
+  prefs.remove("ssid");
+  prefs.remove("pass");
+  for (int i = 0; i < kMaxWifiHistoryNetworks; ++i) {
+    String ssidKey = wifiHistorySsidKey(i);
+    String passKey = wifiHistoryPassKey(i);
+    prefs.remove(ssidKey.c_str());
+    prefs.remove(passKey.c_str());
+  }
+  prefs.end();
 }
 
 String currentIp() {
@@ -2006,6 +2103,14 @@ void scanWifiList() {
   WiFi.scanDelete();
 }
 
+bool scannedNetworkHasSsid(const String &ssid) {
+  if (ssid.length() == 0) return false;
+  for (int i = 0; i < scannedNetworkCount; ++i) {
+    if (scannedSsids[i] == ssid) return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Web server pages (adapted labels for ESP32-S3)
 // ---------------------------------------------------------------------------
@@ -2033,12 +2138,8 @@ String pageEnd() {
 
 void sendWifiPage() {
   String savedSsid = prefString("ssid");
-  bool savedInScan = false;
-  for (int i = 0; i < scannedNetworkCount; ++i) {
-    if (scannedSsids[i] == savedSsid) {
-      savedInScan = true;
-      break;
-    }
+  if (savedSsid.length() == 0 && wifiReady && WiFi.status() == WL_CONNECTED) {
+    savedSsid = WiFi.SSID();
   }
 
   String html = pageStart(F("连接 Wi-Fi"));
@@ -2063,7 +2164,6 @@ void sendWifiPage() {
       html += F("<option value='");
       html += escapeHtml(scannedSsids[i]);
       html += F("'");
-      if (scannedSsids[i] == savedSsid) html += F(" selected");
       html += F(">");
       html += escapeHtml(scannedSsids[i]);
       html += F(" · ");
@@ -2072,15 +2172,11 @@ void sendWifiPage() {
       if (!scannedEncrypted[i]) html += F(" · 开放");
       html += F("</option>");
     }
-    html += F("<option value='__manual__'>手动输入 SSID</option></select></div>");
-    html += F("<div class='field'><span class='label'>手动 SSID</span><input name='ssid_manual' autocomplete='off' value='");
-    if (!savedInScan) html += escapeHtml(savedSsid);
-    html += F("'></div>");
+    html += F("</select></div>");
+    html += F("<div class='field'><span class='label'>手动 SSID</span><input name='ssid_manual' autocomplete='off' value=''></div>");
   } else {
     html += F("<p class='hint'>没有扫到附近 Wi-Fi，请手动输入 SSID。</p>");
-    html += F("<div class='field'><span class='label'>SSID</span><input name='ssid' autocomplete='off' required value='");
-    html += escapeHtml(savedSsid);
-    html += F("'></div>");
+    html += F("<div class='field'><span class='label'>SSID</span><input name='ssid' autocomplete='off' required value=''></div>");
   }
   html += F("<div class='field'><span class='label'>密码</span><input name='pass' type='password' autocomplete='current-password' placeholder='开放网络可留空'></div>");
   html += F("<div class='btn-row'><button class='btn primary' type='submit'>保存并连接</button></div>");
@@ -2091,7 +2187,8 @@ void sendWifiPage() {
   html += F("/</p></form></section>");
 
   if (wifiReady || savedSsid.length() > 0) {
-    html += F("<form method='post' action='/clear' class='card'><button class='btn primary' type='submit'>清除 Wi-Fi 配置并回到热点模式</button></form>");
+    html += F("<form method='post' action='/clear' class='card'><button class='btn primary' type='submit'>重新配置 Wi-Fi</button></form>");
+    html += F("<form method='post' action='/wifi/forget' class='card'><button class='btn warn' type='submit'>清除所有 Wi-Fi 历史</button></form>");
   }
   html += pageEnd();
   server.send(200, F("text/html; charset=utf-8"), html);
@@ -2199,7 +2296,8 @@ void sendStatusPage() {
   }
   html += F("</section>");
 
-  html += F("<form method='post' action='/clear' class='card'><button class='btn primary' type='submit'>清除 Wi-Fi 配置并回到热点模式</button></form>");
+  html += F("<form method='post' action='/clear' class='card'><button class='btn primary' type='submit'>重新配置 Wi-Fi</button></form>");
+  html += F("<form method='post' action='/wifi/forget' class='card'><button class='btn warn' type='submit'>清除所有 Wi-Fi 历史</button></form>");
   html += pageEnd();
   server.send(200, F("text/html; charset=utf-8"), html);
 }
@@ -2661,7 +2759,7 @@ String mcuStatusJson() {
 // ---------------------------------------------------------------------------
 
 bool sendRawWsFrame(uint8_t opcode, const uint8_t *data, size_t length) {
-  if (!mcuWsClient.connected()) return false;
+  if (!mcuWsClient->connected()) return false;
   uint8_t header[14];
   size_t headerLen = 0;
   header[headerLen++] = 0x80 | (opcode & 0x0F);
@@ -2678,7 +2776,7 @@ bool sendRawWsFrame(uint8_t opcode, const uint8_t *data, size_t length) {
   uint8_t mask[4];
   for (uint8_t i = 0; i < 4; ++i) mask[i] = static_cast<uint8_t>(esp_random() & 0xFF);
   for (uint8_t i = 0; i < 4; ++i) header[headerLen++] = mask[i];
-  if (mcuWsClient.write(header, headerLen) != headerLen) return false;
+  if (mcuWsClient->write(header, headerLen) != headerLen) return false;
 
   constexpr size_t kChunk = 256;
   uint8_t buffer[kChunk];
@@ -2688,7 +2786,7 @@ bool sendRawWsFrame(uint8_t opcode, const uint8_t *data, size_t length) {
     for (size_t i = 0; i < n; ++i) {
       buffer[i] = data[offset + i] ^ mask[(offset + i) & 3];
     }
-    if (mcuWsClient.write(buffer, n) != n) return false;
+    if (mcuWsClient->write(buffer, n) != n) return false;
     offset += n;
   }
   return true;
@@ -4229,6 +4327,20 @@ bool broadcastMcuVoiceStreamEnd(const String &interactionId, uint32_t dataBytes)
   return sendMcuSocketJson(json);
 }
 
+bool broadcastMcuVoiceStreamAbort(const String &interactionId, const String &reason, uint32_t dataBytes) {
+  if (!wsReady || !mcuSocketNamespaceReady) return false;
+  String json;
+  json.reserve(340);
+  json += F("{\"type\":\"voice.stream.abort\",\"interactionId\":\"");
+  json += escapeJson(interactionId);
+  json += F("\",\"bytes\":");
+  json += dataBytes;
+  json += F(",\"reason\":\"");
+  json += escapeJson(reason);
+  json += F("\"}");
+  return sendMcuSocketJson(json);
+}
+
 bool broadcastMcuVoiceStreamChunk(const String &interactionId, const uint8_t *data, size_t length, uint32_t offset) {
   if (!wsReady || !mcuSocketNamespaceReady || !data || length == 0) {
     Serial.printf("Voice stream chunk blocked ws=%d namespace=%d data=%d len=%u offset=%lu\n",
@@ -4236,28 +4348,21 @@ bool broadcastMcuVoiceStreamChunk(const String &interactionId, const uint8_t *da
                   static_cast<unsigned>(length), static_cast<unsigned long>(offset));
     return false;
   }
-  String encoded = base64Encode(data, length);
-  if (encoded.length() == 0) {
-    Serial.printf("Voice stream chunk base64 failed len=%u offset=%lu heap=%lu\n",
-                  static_cast<unsigned>(length), static_cast<unsigned long>(offset),
-                  static_cast<unsigned long>(ESP.getFreeHeap()));
-    return false;
-  }
-  String json;
-  json.reserve(encoded.length() + 260);
-  json += F("{\"type\":\"voice.stream.chunk\",\"interactionId\":\"");
-  json += escapeJson(interactionId);
-  json += F("\",\"offset\":");
-  json += offset;
-  json += F(",\"bytes\":");
-  json += length;
-  json += F(",\"data\":\"");
-  json += encoded;
-  json += F("\"}");
-  bool sent = sendMcuSocketJson(json);
+  String payload;
+  payload.reserve(300 + mcuAuthToken.length());
+  payload += F("451-/global-agent,[\"voice.stream.chunk\",{\"type\":\"voice.stream.chunk\",\"interactionId\":\"");
+  payload += escapeJson(interactionId);
+  payload += F("\",\"apiToken\":\"");
+  payload += escapeJson(mcuAuthToken);
+  payload += F("\",\"offset\":");
+  payload += offset;
+  payload += F(",\"bytes\":");
+  payload += length;
+  payload += F(",\"data\":{\"_placeholder\":true,\"num\":0}}]");
+  bool sent = sendRawWsText(payload) && sendRawWsFrame(0x2, data, length);
   if (!sent) {
-    Serial.printf("Voice stream chunk send failed len=%u encoded=%u offset=%lu heap=%lu ws=%d namespace=%d\n",
-                  static_cast<unsigned>(length), static_cast<unsigned>(encoded.length()),
+    Serial.printf("Voice stream binary chunk send failed len=%u offset=%lu heap=%lu ws=%d namespace=%d\n",
+                  static_cast<unsigned>(length),
                   static_cast<unsigned long>(offset), static_cast<unsigned long>(ESP.getFreeHeap()),
                   wsReady ? 1 : 0, mcuSocketNamespaceReady ? 1 : 0);
   }
@@ -4657,10 +4762,15 @@ void handleBootButton() {
 }
 
 String mcuSocketAuthJson() {
+  String deviceCode = mcuDeviceCode();
   String json;
-  json.reserve(mcuAuthToken.length() + selectedProfile.length() + 180);
+  json.reserve(mcuAuthToken.length() + selectedProfile.length() + deviceCode.length() * 2 + 220);
   json += F("{\"token\":\"");
   json += escapeJson(mcuAuthToken);
+  json += F("\",\"deviceCode\":\"");
+  json += escapeJson(deviceCode);
+  json += F("\",\"device_code\":\"");
+  json += escapeJson(deviceCode);
   json += F("\",\"role\":\"hermes-studio\",\"instanceId\":\"");
   json += escapeJson(deviceId());
   json += F("\",\"profile\":\"");
@@ -4775,9 +4885,9 @@ bool readMcuWsBytes(uint8_t *buffer, size_t length, uint32_t timeoutMs = 100) {
   size_t read = 0;
   uint32_t startedAt = millis();
   while (read < length && millis() - startedAt < timeoutMs) {
-    int available = mcuWsClient.available();
+    int available = mcuWsClient->available();
     if (available > 0) {
-      int n = mcuWsClient.read(buffer + read, min(static_cast<size_t>(available), length - read));
+      int n = mcuWsClient->read(buffer + read, min(static_cast<size_t>(available), length - read));
       if (n > 0) read += static_cast<size_t>(n);
     } else {
       delay(1);
@@ -4788,7 +4898,7 @@ bool readMcuWsBytes(uint8_t *buffer, size_t length, uint32_t timeoutMs = 100) {
 }
 
 void closeMcuSocketTransport(const __FlashStringHelper *reason) {
-  if (mcuWsClient.connected()) mcuWsClient.stop();
+  if (mcuWsClient->connected()) mcuWsClient->stop();
   wsReady = false;
   mcuSocketConnected = false;
   mcuSocketNamespaceReady = false;
@@ -4802,12 +4912,12 @@ void closeMcuSocketTransport(const __FlashStringHelper *reason) {
 
 void mcuSocketLoop() {
   if (!wsReady) return;
-  if (!mcuWsClient.connected()) {
+  if (!mcuWsClient->connected()) {
     closeMcuSocketTransport(F("tcp closed"));
     return;
   }
 
-  while (mcuWsClient.available() >= 2) {
+  while (mcuWsClient->available() >= 2) {
     uint8_t header[2];
     if (!readMcuWsBytes(header, 2)) return;
     uint8_t opcode = header[0] & 0x0F;
@@ -4848,7 +4958,9 @@ void mcuSocketLoop() {
 }
 
 void disconnectMcuSocketClient() {
-  if (mcuWsClient.connected()) mcuWsClient.stop();
+  if (mcuWsPlainClient.connected()) mcuWsPlainClient.stop();
+  if (mcuWsSecureClient.connected()) mcuWsSecureClient.stop();
+  mcuWsClient = &mcuWsPlainClient;
   wsReady = false;
   mcuSocketConnected = false;
   mcuSocketNamespaceReady = false;
@@ -4874,12 +4986,19 @@ void connectMcuSocketClient() {
   if (wsReady && mcuSocketTargetKey == targetKey) return;
   disconnectMcuSocketClient();
 
-  if (scheme != F("http")) {
+  if (scheme != F("http") && scheme != F("https")) {
     Serial.printf("Socket.IO client unsupported scheme=%s\n", scheme.c_str());
     return;
   }
 
-  if (!mcuWsClient.connect(host.c_str(), port, 5000)) {
+  if (scheme == F("https")) {
+    mcuWsSecureClient.setInsecure();
+    mcuWsClient = &mcuWsSecureClient;
+  } else {
+    mcuWsClient = &mcuWsPlainClient;
+  }
+  mcuWsClient->setTimeout(5);
+  if (!mcuWsClient->connect(host.c_str(), port, 5000)) {
     Serial.printf("Socket.IO tcp connect failed host=%s port=%u\n", host.c_str(), port);
     return;
   }
@@ -4897,18 +5016,18 @@ void connectMcuSocketClient() {
   request += F("\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ");
   request += key;
   request += F("\r\nUser-Agent: HStudio-ESP32S3\r\n\r\n");
-  mcuWsClient.print(request);
+  mcuWsClient->print(request);
 
-  String statusLine = mcuWsClient.readStringUntil('\n');
+  String statusLine = mcuWsClient->readStringUntil('\n');
   statusLine.trim();
   if (!statusLine.startsWith(F("HTTP/1.1 101")) && !statusLine.startsWith(F("HTTP/1.0 101"))) {
     Serial.printf("Socket.IO websocket upgrade failed: %s\n", statusLine.c_str());
-    mcuWsClient.stop();
+    mcuWsClient->stop();
     return;
   }
   uint32_t headerStartedAt = millis();
-  while (mcuWsClient.connected() && millis() - headerStartedAt < 3000) {
-    String line = mcuWsClient.readStringUntil('\n');
+  while (mcuWsClient->connected() && millis() - headerStartedAt < 3000) {
+    String line = mcuWsClient->readStringUntil('\n');
     line.trim();
     if (line.length() == 0) break;
   }
@@ -4949,7 +5068,7 @@ void sendConnectFailedPage(const String &ssid) {
   html += F("<p class='lead bad'>没有连上 ");
   html += escapeHtml(ssid);
   html += F("。请检查 SSID 和密码后重试。</p>");
-  html += F("<div class='btn-row'><a class='btn primary' href='/wifi'>返回配网</a><a class='btn primary' href='/clear'>清除配置</a></div></section>");
+  html += F("<div class='btn-row'><a class='btn primary' href='/wifi'>返回配网</a><a class='btn primary' href='/clear'>重新配置</a></div></section>");
   html += pageEnd();
   server.send(200, F("text/html; charset=utf-8"), html);
 }
@@ -4996,11 +5115,12 @@ void saveWifi() {
     server.send(400, F("text/plain; charset=utf-8"), F("缺少 SSID"));
     return;
   }
-  prefs.begin("net", false);
-  prefs.putString("ssid", ssid);
-  prefs.putString("pass", pass);
-  prefs.end();
+  if (pass.length() == 0) {
+    savedWifiPasswordForSsid(ssid, pass);
+  }
+
   if (connectWifiCredentials(ssid, pass, WIFI_AP_STA)) {
+    rememberWifiCredential(ssid, pass);
     sendConnectSuccessPage(ssid, WiFi.localIP());
     restartPending = true;
     restartAtMs = millis() + kProvisionRestartDelayMs;
@@ -5010,26 +5130,58 @@ void saveWifi() {
   sendConnectFailedPage(ssid);
 }
 
+void startSetupAp(bool refreshScan);
+
 void clearWifi() {
-  prefs.begin("net", false);
-  prefs.clear();
-  prefs.end();
-  setLcdStatus(LcdMode::Think, F("WIFI"), F("CLEAR"), 40);
+  setLcdStatus(LcdMode::Think, F("WIFI"), F("SETUP"), 40);
   server.send(200, F("text/html; charset=utf-8"),
-              F("<!doctype html><meta charset='utf-8'><p>已清除，设备正在重启并回到热点模式...</p>"));
-  delay(700);
-  ESP.restart();
+              F("<!doctype html><meta charset='utf-8'><p>设备正在进入配网模式，请连接 HStudio-WIFI 热点。</p>"));
+  delay(300);
+  startSetupAp(true);
+}
+
+void forgetWifiHistory() {
+  forgetAllWifiCredentials();
+  setLcdStatus(LcdMode::Think, F("WIFI"), F("FORGET"), 40);
+  server.send(200, F("text/html; charset=utf-8"),
+              F("<!doctype html><meta charset='utf-8'><p>已清除所有 Wi-Fi 历史，设备正在进入配网模式...</p>"));
+  delay(300);
+  startSetupAp(true);
 }
 
 bool connectSavedWifi() {
-  String ssid = prefString("ssid");
-  String pass = prefString("pass");
-  ssid.trim();
-  if (ssid.length() == 0) return false;
-  return connectWifiCredentials(ssid, pass, WIFI_STA);
+  scanWifiList();
+
+  String ssids[kMaxWifiHistoryNetworks];
+  String passes[kMaxWifiHistoryNetworks];
+  int count = 0;
+  loadWifiCredentials(ssids, passes, count);
+  if (count == 0) {
+    Serial.println(F("No saved WiFi credentials, entering setup AP"));
+    esp_rom_printf("No saved WiFi credentials, entering setup AP\n");
+    return false;
+  }
+
+  bool matched = false;
+  for (int i = 0; i < count; ++i) {
+    if (!scannedNetworkHasSsid(ssids[i])) continue;
+    matched = true;
+    Serial.printf("Saved WiFi found in scan ssid=%s\n", ssids[i].c_str());
+    esp_rom_printf("Saved WiFi found in scan ssid=%s\n", ssids[i].c_str());
+    if (connectWifiCredentials(ssids[i], passes[i], WIFI_STA)) {
+      rememberWifiCredential(ssids[i], passes[i]);
+      return true;
+    }
+  }
+
+  if (!matched) {
+    Serial.println(F("No saved WiFi SSID found in scan, entering setup AP"));
+    esp_rom_printf("No saved WiFi SSID found in scan, entering setup AP\n");
+  }
+  return false;
 }
 
-void startSetupAp() {
+void startSetupAp(bool refreshScan = true) {
   setLcdStatus(LcdMode::Think, F("SETUP"), F("AP START"), 35);
   if (lanUdpReady) {
     lanUdp.stop();
@@ -5037,7 +5189,7 @@ void startSetupAp() {
   }
   lanDeviceCount = 0;
   lastLanDiscoveryAtMs = 0;
-  scanWifiList();
+  if (refreshScan) scanWifiList();
   WiFi.persistent(false);
   WiFi.disconnect(true, true);
   WiFi.softAPdisconnect(true);
@@ -5059,7 +5211,7 @@ void startSetupAp() {
 
 void handleRoot() {
   if (wifiReady && WiFi.status() == WL_CONNECTED) {
-    sendStatusPage();
+    scanAndSendStatusPage();
     return;
   }
   sendWifiPage();
@@ -5167,6 +5319,7 @@ void setupRoutes() {
   server.on(F("/ota/check"), HTTP_POST, handleOtaCheck);
   server.on(F("/wifi"), HTTP_GET, sendWifiPage);
   server.on(F("/wifi"), HTTP_POST, saveWifi);
+  server.on(F("/wifi/forget"), HTTP_POST, forgetWifiHistory);
   server.on(F("/clear"), HTTP_GET, clearWifi);
   server.on(F("/clear"), HTTP_POST, clearWifi);
   server.on(F("/health"), HTTP_GET, handleHealth);
@@ -5199,8 +5352,10 @@ void setup() {
   selectedProfile = prefs.getString("last_profile", "");
   prefs.end();
   setLcdStatus(LcdMode::Boot, F("BOOT"), F("WIFI ONLY"), 15);
-  if (kForceSetupAp || !connectSavedWifi()) {
+  if (kForceSetupAp) {
     startSetupAp();
+  } else if (!connectSavedWifi()) {
+    startSetupAp(false);
   }
   setupRoutes();
   if (wifiReady && !setupApMode) {
@@ -5246,7 +5401,9 @@ void loop() {
       setLcdStatus(LcdMode::Error, F("WIFI"), F("LOST"), 0);
       delay(500);
       wifiDisconnectedSinceMs = 0;
-      startSetupAp();
+      if (!connectSavedWifi()) {
+        startSetupAp(false);
+      }
     }
   } else if (wifiReady) {
     wifiDisconnectedSinceMs = 0;
