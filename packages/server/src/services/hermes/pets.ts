@@ -290,10 +290,15 @@ function normalizeInstalledPet(pet: PetdexPet, asset: { mime: string }, now: num
 
 function notifyMcuPetChanged(profile: string): void {
   const server = getGlobalAgentServer()
-  if (!server) return
+  if (!server) {
+    logger.warn({ profile }, '[pets] cannot notify MCU: global agent server not running')
+    return
+  }
   const notified = server.broadcastToMcuClients(profile, { type: 'pet.changed', profile })
   if (notified > 0) {
     logger.info({ profile, notified }, '[pets] notified MCU clients of pet change')
+  } else {
+    logger.warn({ profile }, '[pets] no MCU clients matched for pet change notification')
   }
 }
 

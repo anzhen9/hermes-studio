@@ -525,12 +525,18 @@ export class GlobalAgentServer {
 
   broadcastToMcuClients(profile: string, payload: Record<string, unknown>): number {
     let count = 0
+    const totalClients = this.clients.size
+    const clientProfiles: string[] = []
     for (const socket of this.clients.values()) {
       const socketProfile = String(socket.data.profile || '').trim()
+      clientProfiles.push(socketProfile || '(empty)')
       if (socketProfile && socketProfile !== profile) continue
       const event = typeof payload.type === 'string' && payload.type.trim() ? payload.type.trim() : 'mcu.event'
       socket.emit(event, payload)
       count += 1
+    }
+    if (count === 0) {
+      logger.info({ profile, totalClients, clientProfiles }, '[global-agent] broadcastToMcuClients matched 0 clients')
     }
     return count
   }
