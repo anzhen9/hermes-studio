@@ -340,6 +340,7 @@ export async function handleBridgeRun(
     : getSystemPrompt(undefined, { source: data.session_source || data.source })
   const sessionRow = getSession(session_id)
   const workspace = await ensureHermesRunWorkspace(profile, sessionRow?.workspace || data.workspace)
+  const shouldEmitWorkspaceUpdate = Boolean(workspace && !sessionRow?.workspace)
   if (sessionRow && !sessionRow.workspace) updateSession(session_id, { workspace })
   const sessionModel = sessionRow?.model || ''
   const sessionProvider = sessionRow?.provider || ''
@@ -373,6 +374,13 @@ export async function handleBridgeRun(
       ? await loadSessionStateFromDbFn(session_id, sessionMap)
       : { messages: [], isWorking: false, events: [], queue: [] }
     sessionMap.set(session_id, state)
+  }
+  if (sessionRow) {
+    try {
+      updateSession(session_id, { ended_at: null, end_reason: null, last_active: now })
+    } catch (err) {
+      bridgeLogger.warn(err, '[chat-run-socket] failed to reopen session %s for bridge run', session_id)
+    }
   }
 
   state.isWorking = true
@@ -460,6 +468,12 @@ export async function handleBridgeRun(
     if (!data.onEvent && !nsp.adapter.rooms.get(`session:${session_id}`)?.size && socket.connected) {
       socket.emit(event, tagged)
     }
+  }
+  if (shouldEmitWorkspaceUpdate) {
+    emit('session.workspace.updated', {
+      event: 'session.workspace.updated',
+      workspace,
+    })
   }
 
   const history = await buildCompressedHistory(
@@ -666,7 +680,15 @@ export async function handleBridgeRun(
       contextTokens: errContextTokens,
       queue_remaining: queueLen,
     })
-    if (queueLen > 0) dequeueNextQueuedRun(socket, session_id)
+    if (queueLen > 0) {
+      dequeueNextQueuedRun(socket, session_id)
+    } else {
+      try {
+        updateSession(session_id, { ended_at: Math.floor(Date.now() / 1000), end_reason: 'error' })
+      } catch (endErr) {
+        bridgeLogger.warn(endErr, '[chat-run-socket] failed to write ended_at for session %s', session_id)
+      }
+    }
   }
 }
 
@@ -813,6 +835,13 @@ export async function resumeBridgeRun(
       error: err instanceof Error ? err.message : String(err),
       resumed: true,
     })
+    if ((state.queue?.length ?? 0) === 0) {
+      try {
+        updateSession(sessionId, { ended_at: Math.floor(Date.now() / 1000), end_reason: 'error' })
+      } catch (endErr) {
+        bridgeLogger.warn(endErr, '[chat-run-socket] failed to write ended_at for session %s', sessionId)
+      }
+    }
   }
 }
 
@@ -1430,6 +1459,11 @@ async function applyBridgeChunkAsync(
   } else if (!state.activeRunMarker) {
     state.isWorking = false
     state.profile = undefined
+    try {
+      updateSession(sessionId, { ended_at: Math.floor(Date.now() / 1000), end_reason: terminalError ? 'error' : 'complete' })
+    } catch (endErr) {
+      bridgeLogger.warn(endErr, '[chat-run-socket] failed to write ended_at for session %s', sessionId)
+    }
   }
 }
 
