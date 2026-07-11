@@ -239,6 +239,9 @@ export default {
     noChangelog: '目前無更新日誌',
     versionManagement: '版本管理',
     updateAvailableLabel: '(有新版)',
+    dockerUpdateTitle: 'Docker 升級',
+    dockerUpdateGuide: '當前運行在 Docker 環境中，請拉取最新映像檔並重建容器來升級：',
+    dockerUpdateNote: '資料會持續保留，重建容器不會遺失資料。',
   },
 
   runtimeVersions: {
@@ -2324,6 +2327,8 @@ export default {
     estimatedCost: '預估費用',
     cacheHitRate: '快取命中率',
     modelBreakdown: '模型分布',
+    agentBreakdown: 'Agent 分布',
+    agents: { hermes: 'Hermes Agent', claudeCode: 'Claude Code', codex: 'Codex', ekkoAgent: 'Ekko Agent', unknown: '未知' },
     dailyTrend: '每日用量',
     date: '日期',
     tokens: 'Token',
