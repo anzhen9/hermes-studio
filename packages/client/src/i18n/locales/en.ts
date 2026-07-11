@@ -238,6 +238,9 @@ export default {
     noChangelog: 'No changelog available',
     versionManagement: 'Version Management',
     updateAvailableLabel: '(New version)',
+    dockerUpdateTitle: 'Docker Update',
+    dockerUpdateGuide: 'In Docker environment, please pull the latest image and recreate the container to upgrade:',
+    dockerUpdateNote: 'Your data will persist after the container is recreated.',
   },
 
   runtimeVersions: {
@@ -2293,6 +2296,8 @@ export default {
     estimatedCost: 'Est. Cost',
     cacheHitRate: 'Cache Hit Rate',
     modelBreakdown: 'Model Breakdown',
+    agentBreakdown: 'Agent Breakdown',
+    agents: { hermes: 'Hermes Agent', claudeCode: 'Claude Code', codex: 'Codex', ekkoAgent: 'Ekko Agent', unknown: 'Unknown' },
     dailyTrend: 'Daily Usage',
     date: 'Date',
     tokens: 'Tokens',

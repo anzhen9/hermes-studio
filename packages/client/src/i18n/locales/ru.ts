@@ -161,6 +161,9 @@ export default {
     noChangelog: 'Нет списка изменений',
     versionManagement: 'Управление версиями',
     updateAvailableLabel: '(Новая версия)',
+    dockerUpdateTitle: 'Обновление Docker',
+    dockerUpdateGuide: 'В среде Docker, пожалуйста, загрузите последний образ и пересоздайте контейнер:',
+    dockerUpdateNote: 'Ваши данные сохранятся после пересоздания контейнера.',
   },
 
   runtimeVersions: {
@@ -2071,6 +2074,8 @@ export default {
     estimatedCost: 'Примерная стоимость',
     cacheHitRate: 'Попадания в кэш',
     modelBreakdown: 'Распределение по моделям',
+    agentBreakdown: 'Распределение по агентам',
+    agents: { hermes: 'Hermes Agent', claudeCode: 'Claude Code', codex: 'Codex', ekkoAgent: 'Ekko Agent', unknown: 'Неизвестно' },
     dailyTrend: 'Ежедневная динамика',
     date: 'Дата',
     tokens: 'Токены',
