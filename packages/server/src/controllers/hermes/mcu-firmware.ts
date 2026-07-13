@@ -5,7 +5,7 @@ import { createHash } from 'crypto'
 import { resolve } from 'path'
 
 type FirmwareTarget = 'c3' | 'sparkbot'
-type FirmwareVersion = 'v1'
+type FirmwareVersion = 'v1' | 'v2'
 type FirmwareContext = Context & { params?: Record<string, unknown> }
 
 interface FirmwareInfo {
@@ -21,14 +21,14 @@ interface TargetConfig {
   target: string
   legacyRoute: string
   versionedRoute: (version: FirmwareVersion) => string
-  distPathByVersion: Record<FirmwareVersion, string>
-  devPathByVersion: Record<FirmwareVersion, string>
+  distPathByVersion: Partial<Record<FirmwareVersion, string>>
+  devPathByVersion: Partial<Record<FirmwareVersion, string>>
   legacyDistFallback: string
 }
 
 const DEFAULT_FIRMWARE_VERSION: FirmwareVersion = 'v1'
 const SUPPORTED_VERSIONS: Record<FirmwareTarget, Set<string>> = {
-  c3: new Set<string>([DEFAULT_FIRMWARE_VERSION]),
+  c3: new Set<string>(['v1', 'v2'] satisfies FirmwareVersion[]),
   sparkbot: new Set<string>([DEFAULT_FIRMWARE_VERSION]),
 }
 
@@ -39,9 +39,11 @@ const TARGETS: Record<FirmwareTarget, TargetConfig> = {
     versionedRoute: (version) => `/api/hermes/mcu/firmware/${version}/firmware.bin`,
     distPathByVersion: {
       v1: resolve(process.cwd(), 'dist', 'mcu', 'v1', 'firmware.bin'),
+      v2: resolve(process.cwd(), 'dist', 'mcu', 'v2', 'firmware.bin'),
     },
     devPathByVersion: {
       v1: resolve(process.cwd(), 'packages/esp32-c3/v1/.pio/build/esp32-c3-devkitm-1/firmware.bin'),
+      v2: resolve(process.cwd(), 'packages/esp32-c3/v2/.pio/build/esp32-c3-devkitm-1/firmware.bin'),
     },
     legacyDistFallback: resolve(process.cwd(), 'dist', 'mcu', 'firmware.bin'),
   },
