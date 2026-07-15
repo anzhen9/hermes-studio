@@ -759,8 +759,53 @@ bool lcdFlush() {
   return true;
 }
 
+void drawInteractionCompactFrame() {
+  lcdDrawText(6, 6, F("HSTUDIO"), 2, kColorFg);
+  drawWifiGlyph(196, 4, kColorFg);
+  lcdDrawHLine(0, 28, kLcdWidth, kColorMuted);
+
+  drawActivePetFrame();
+
+  uint16_t titleColor = kColorFg;
+  if (mcuInteractionStatus == F("failed") || mcuInteractionStatus == F("aborted")) {
+    titleColor = kColorWarn;
+  } else if (mcuInteractionStatus == F("completed")) {
+    titleColor = kColorGood;
+  } else if (mcuInteractionStatus == F("thinking") || mcuInteractionStatus == F("listening")) {
+    titleColor = kColorThink;
+  }
+
+  String title = interactionStatusLabel();
+  title.toUpperCase();
+  constexpr uint8_t kCompactScale = 2;
+  int titleX = 6;
+  lcdDrawText(titleX, 188, fitLcdText(title, 6), kCompactScale, titleColor);
+
+  String queue = String(F("QUEUE ")) + mcuAudioCount;
+  int queueWidth = lcdTextWidth(queue, kCompactScale);
+  lcdDrawText(kLcdWidth - 6 - queueWidth, 188, queue, kCompactScale, kColorMuted);
+
+  String detail = mcuInteractionText;
+  if (mcuInteractionStatus == F("tool")) {
+    detail = mcuToolName;
+    if (mcuToolStatus.length() > 0) {
+      detail += F(" ");
+      detail += mcuToolStatus;
+    }
+  }
+  if (detail.length() > 0) {
+    lcdDrawScrollingText(210, detail, kCompactScale, kColorFg);
+  } else {
+    lcdDrawScrollingText(210, lcdHint.length() > 0 ? lcdHint : lcdTitle, kCompactScale, kColorFg);
+  }
+}
+
 void drawLcdFrame() {
   if (mcuInteractionActive) {
+    if (activePetDisplay.available) {
+      drawInteractionCompactFrame();
+      return;
+    }
     drawInteractionFrame();
     return;
   }
