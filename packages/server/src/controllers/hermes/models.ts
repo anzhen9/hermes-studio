@@ -28,6 +28,22 @@ type CustomModels = Record<string, string[]>
 
 const RESERVED_ALIAS_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
 
+function enabledMoaPresetNames(config: any): string[] {
+  const presets = config?.moa?.presets
+  if (!presets || typeof presets !== 'object' || Array.isArray(presets)) return []
+  const enabled = Object.entries(presets)
+    .filter(([name, preset]) => {
+      if (!name.trim() || !preset || typeof preset !== 'object' || Array.isArray(preset)) return false
+      return (preset as Record<string, unknown>).enabled !== false
+    })
+    .map(([name]) => name.trim())
+  const defaultPreset = typeof config?.moa?.default_preset === 'string'
+    ? config.moa.default_preset.trim()
+    : ''
+  if (!defaultPreset || !enabled.includes(defaultPreset)) return enabled
+  return [defaultPreset, ...enabled.filter(name => name !== defaultPreset)]
+}
+
 function isSafeAliasKey(value: string): boolean {
   const trimmed = value.trim()
   return !!trimmed && trimmed.length <= 512 && !RESERVED_ALIAS_KEYS.has(trimmed)
@@ -455,6 +471,20 @@ async function buildAvailableForProfile(
     currentDefault = currentDefault || fallback.default
   }
 
+  const moaPresets = enabledMoaPresetNames(config)
+  if (moaPresets.length > 0) {
+    addGroup(
+      'moa',
+      'Mixture of Agents',
+      'moa://local',
+      moaPresets,
+      'moa-virtual-provider',
+      true,
+      undefined,
+      { api_mode: 'chat_completions' },
+    )
+  }
+
   for (const g of groups) {
     g.models = Array.from(new Set(g.models))
     g.available_models = Array.from(new Set(g.available_models || g.models))
@@ -462,6 +492,14 @@ async function buildAvailableForProfile(
   const groupsWithCustomModels = applyCustomModels(groups, normalizeCustomModels(appConfig.customModels))
 
   return { profile, default: currentDefault, default_provider: currentDefaultProvider, groups: groupsWithCustomModels }
+}
+
+export async function getAvailableModelGroupsForProfile(profile: string): Promise<AvailableGroup[]> {
+  const appConfig = await readAppConfig()
+  const modelVisibility = normalizeModelVisibility(appConfig.modelVisibility)
+  const modelCatalogCache = await readProviderModelCatalogCache()
+  const result = await buildAvailableForProfile(profile || 'default', modelCatalogCache, appConfig)
+  return applyModelVisibility(result.groups, modelVisibility)
 }
 
 export async function getAvailable(ctx: any) {
