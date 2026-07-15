@@ -61,6 +61,8 @@ constexpr int kActivePetRegionY = 34;
 constexpr int kActivePetRegionWidth = 192;
 constexpr int kActivePetRegionHeight = 136;
 constexpr uint32_t kLcdRefreshIntervalMs = 160;
+constexpr uint32_t kLcdSuccessReturnDelayMs = 2500;
+constexpr uint32_t kLcdErrorReturnDelayMs = 6000;
 constexpr uint32_t kActivePetRefreshIntervalMs = 30000;
 constexpr uint32_t kActivePetRetryMs = 10000;
 constexpr uint32_t kActivePetStateIntervalMs = 3000;
@@ -95,16 +97,19 @@ constexpr uint32_t kBootLongPressMs = 360;
 constexpr uint32_t kBootDoubleClickMs = 320;
 constexpr uint32_t kWifiDisconnectGraceMs = 8000;
 constexpr uint32_t kVoiceRecordMs = 4000;
-constexpr uint32_t kVoiceStreamRecordMs = 10000;
+constexpr uint32_t kVoiceStreamRecordMs = 120000;
 constexpr uint32_t kVoiceRecordMinMs = 300;
-constexpr uint32_t kVoiceRecordHardTimeoutMs = 12000;
+constexpr uint32_t kVoiceRecordHardTimeoutMs = 125000;
 constexpr uint32_t kVoiceVadRmsStart = 190;
 constexpr uint32_t kVoiceVadPeakStart = 480;
 constexpr uint32_t kVoiceVadActiveThreshold = 260;
 constexpr uint32_t kVoiceVadMinActiveSamples = 16;
 constexpr int kVoiceInputGainPermille = 2800;
 constexpr int kAudioSampleRate = 24000;
+constexpr int kVoiceInputSampleRate = kAudioSampleRate;
 constexpr int kMcuAudioDefaultSampleRate = 24000;
+constexpr size_t kVoiceStreamChunkFrames = 4096;
+constexpr size_t kVoiceStreamAdpcmMaxBytes = kMcuAdpcmHeaderBytes + ((kVoiceStreamChunkFrames + 1) / 2);
 constexpr size_t kVoiceRecordMaxFrames = (kAudioSampleRate * kVoiceRecordMs) / 1000UL;
 constexpr size_t kVoiceRecordBufferBytes = 44 + kVoiceRecordMaxFrames * sizeof(int16_t);
 constexpr int kVoiceOutputGainPermille = 820;
@@ -151,6 +156,7 @@ bool bootClickPending = false;
 bool bootSecondClickStarted = false;
 bool bootInputArmed = false;
 uint32_t lastLcdAtMs = 0;
+uint32_t lcdStatusReturnAtMs = 0;
 uint32_t restartAtMs = 0;
 uint32_t lastLanDiscoveryAtMs = 0;
 uint32_t lastMcuLoginAtMs = 0;
@@ -808,8 +814,30 @@ void setLcdStatus(LcdMode mode, const String &title, const String &hint, uint8_t
   lcdTitle = nextTitle;
   lcdHint = nextHint;
   lcdProgress = progress > 100 ? 100 : progress;
+  lcdStatusReturnAtMs = 0;
+  bool isLanIpStatus = nextTitle == F("IP");
+  if (!isLanIpStatus && wifiReady && WiFi.status() == WL_CONNECTED &&
+      (mode == LcdMode::Ready || mode == LcdMode::Error)) {
+    uint32_t delayMs = mode == LcdMode::Error ? kLcdErrorReturnDelayMs : kLcdSuccessReturnDelayMs;
+    lcdStatusReturnAtMs = millis() + delayMs;
+  }
   lcdDirty = true;
   refreshLcd(true);
+}
+
+void showLanIpOnLcd() {
+  if (!wifiReady || WiFi.status() != WL_CONNECTED) return;
+  setLcdStatus(LcdMode::Ready, F("IP"), WiFi.localIP().toString(), 0);
+}
+
+void tickLcdStatusReturn() {
+  if (lcdStatusReturnAtMs == 0 || static_cast<int32_t>(millis() - lcdStatusReturnAtMs) < 0) return;
+  if (!wifiReady || WiFi.status() != WL_CONNECTED) {
+    lcdStatusReturnAtMs = 0;
+    return;
+  }
+  if (mcuInteractionActive || mcuAudioPlaying || audioBusy) return;
+  showLanIpOnLcd();
 }
 
 void initLcdDisplay() {
@@ -1473,6 +1501,64 @@ uint16_t sampleMagnitude(int16_t sample) {
   return sample == INT16_MIN ? 32768 : static_cast<uint16_t>(sample < 0 ? -sample : sample);
 }
 
+enum class VoiceInputChannel : uint8_t {
+  Undecided,
+  Left,
+  Right,
+  Mixed,
+};
+
+const char *voiceInputChannelName(VoiceInputChannel channel) {
+  switch (channel) {
+    case VoiceInputChannel::Left:
+      return "left";
+    case VoiceInputChannel::Right:
+      return "right";
+    case VoiceInputChannel::Mixed:
+      return "mixed";
+    default:
+      return "undecided";
+  }
+}
+
+void updateVoiceInputChannel(VoiceInputChannel &channel, const int16_t *samples, size_t count) {
+  if (channel != VoiceInputChannel::Undecided || !samples) return;
+
+  uint16_t leftPeak = 0;
+  uint16_t rightPeak = 0;
+  uint64_t leftSquares = 0;
+  uint64_t rightSquares = 0;
+  for (size_t i = 0; i + 1 < count; i += 2) {
+    uint16_t leftMag = sampleMagnitude(samples[i]);
+    uint16_t rightMag = sampleMagnitude(samples[i + 1]);
+    if (leftMag > leftPeak) leftPeak = leftMag;
+    if (rightMag > rightPeak) rightPeak = rightMag;
+    leftSquares += static_cast<uint64_t>(leftMag) * static_cast<uint64_t>(leftMag);
+    rightSquares += static_cast<uint64_t>(rightMag) * static_cast<uint64_t>(rightMag);
+  }
+
+  if (leftPeak < kVoiceVadPeakStart && rightPeak < kVoiceVadPeakStart) return;
+
+  constexpr uint64_t kDominanceRatio = 4;
+  if (leftPeak >= kVoiceVadPeakStart &&
+      (rightPeak < kVoiceVadPeakStart || leftSquares > rightSquares * kDominanceRatio)) {
+    channel = VoiceInputChannel::Left;
+  } else if (rightPeak >= kVoiceVadPeakStart &&
+             (leftPeak < kVoiceVadPeakStart || rightSquares > leftSquares * kDominanceRatio)) {
+    channel = VoiceInputChannel::Right;
+  } else {
+    channel = VoiceInputChannel::Mixed;
+  }
+}
+
+int16_t voiceInputMonoSample(int16_t left, int16_t right, VoiceInputChannel channel) {
+  if (channel == VoiceInputChannel::Left) return shapeVoiceInputSample(left);
+  if (channel == VoiceInputChannel::Right) return shapeVoiceInputSample(right);
+
+  int32_t mixed = (static_cast<int32_t>(left) + static_cast<int32_t>(right)) / 2;
+  return shapeVoiceInputSample(static_cast<int16_t>(mixed));
+}
+
 void shapePcmBuffer(uint8_t *buffer, size_t length) {
   for (size_t i = 0; i + 1 < length; i += 2) {
     int16_t sample = static_cast<int16_t>(static_cast<uint16_t>(buffer[i]) |
@@ -1589,6 +1675,7 @@ bool recordVoiceWav(uint8_t **outWav, size_t *outLen) {
   uint16_t monoPeak = 0;
   uint64_t monoSquares = 0;
   uint32_t activeSamples = 0;
+  VoiceInputChannel inputChannel = VoiceInputChannel::Undecided;
   const char *stopReason = "max";
   voiceRecordHeardSpeech = false;
   voiceRecordRms = 0;
@@ -1634,6 +1721,7 @@ bool recordVoiceWav(uint8_t **outWav, size_t *outLen) {
 
     int16_t *samples = reinterpret_cast<int16_t *>(readBuffer);
     size_t count = bytesRead / sizeof(int16_t);
+    updateVoiceInputChannel(inputChannel, samples, count);
     for (size_t i = 0; i + 1 < count && framesDone < maxFrames; i += 2) {
       int16_t left = samples[i];
       int16_t right = samples[i + 1];
@@ -1642,7 +1730,7 @@ bool recordVoiceWav(uint8_t **outWav, size_t *outLen) {
       if (leftMag > leftPeak) leftPeak = leftMag;
       if (rightMag > rightPeak) rightPeak = rightMag;
 
-      int16_t mono = shapeVoiceInputSample(right);
+      int16_t mono = voiceInputMonoSample(left, right, inputChannel);
       uint16_t monoMag = sampleMagnitude(mono);
       if (monoMag > monoPeak) monoPeak = monoMag;
       monoSquares += static_cast<uint64_t>(monoMag) * static_cast<uint64_t>(monoMag);
@@ -1683,11 +1771,13 @@ bool recordVoiceWav(uint8_t **outWav, size_t *outLen) {
                     F("/") + String(monoPeak) +
                     F(", rms=") + String(voiceRecordRms) +
                     F(", active=") + String(voiceRecordActiveSamples) +
+                    F(", channel=") + voiceInputChannelName(inputChannel) +
                     F(", vad=") + (voiceRecordHeardSpeech ? F("speech") : F("quiet"));
-  Serial.printf("Voice record frames=%lu bytes=%lu stop=%s peak L/R/M=%u/%u/%u rms=%lu active=%lu vad=%s\n",
+  Serial.printf("Voice record frames=%lu bytes=%lu stop=%s peak L/R/M=%u/%u/%u rms=%lu active=%lu channel=%s vad=%s\n",
                 static_cast<unsigned long>(framesDone), static_cast<unsigned long>(44 + dataBytes),
                 stopReason, leftPeak, rightPeak, monoPeak, static_cast<unsigned long>(voiceRecordRms),
-                static_cast<unsigned long>(voiceRecordActiveSamples), voiceRecordHeardSpeech ? "speech" : "quiet");
+                static_cast<unsigned long>(voiceRecordActiveSamples), voiceInputChannelName(inputChannel),
+                voiceRecordHeardSpeech ? "speech" : "quiet");
   *outWav = wav;
   *outLen = 44 + dataBytes;
   return framesDone > 0;
@@ -2126,7 +2216,7 @@ String pageStart(const String &title) {
                   "main{max-width:760px;margin:auto;padding:28px 18px 40px}.panel,.card{background:var(--surface);border:1px solid var(--line);border-radius:6px}.panel{padding:22px}.card{padding:16px;margin-top:12px}"
                   "h1{font-size:clamp(28px,5vw,44px);line-height:1.05;margin:0 0 10px}h2{font-size:18px;margin:0 0 10px}.lead,.hint{color:var(--muted);line-height:1.6}.lead{font-size:15px;margin:0 0 18px}.hint{font-size:12px;margin:0}.meta{font:12px/1.4 ui-monospace,'SFMono-Regular',Consolas,monospace;color:var(--muted);word-break:break-all}"
                   "form{display:grid;gap:12px}.field{display:grid;gap:7px}.label{font-size:12px;color:var(--muted)}input,select{width:100%;min-height:42px;border:1px solid var(--line);border-radius:6px;background:#fff;padding:10px 11px;font:14px/1.2 ui-monospace,'SFMono-Regular',Consolas,monospace;color:var(--ink)}select{appearance:none;-webkit-appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 18px) 18px,calc(100% - 13px) 18px;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:34px}input:focus,select:focus{outline:2px solid #cfcfcf;outline-offset:1px}"
-                  ".tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);margin:18px -22px 18px;padding:0 22px}.tab{border:1px solid var(--line);border-bottom:0;border-radius:6px 6px 0 0;background:#f4f4f4;min-height:38px;padding:10px 14px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none}.tab.active{background:var(--surface);position:relative;top:1px}.info-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.info-row{border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}.info-row span{display:block;color:var(--muted);font-size:12px;margin-bottom:7px}.info-row strong{display:block;font:600 14px/1.35 ui-monospace,'SFMono-Regular',Consolas,monospace;word-break:break-all}@media(max-width:560px){.info-grid{grid-template-columns:1fr}}"
+                  ".tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);margin:18px -22px 18px;padding:0 22px}.tab{border:1px solid var(--line);border-bottom:0;border-radius:6px 6px 0 0;background:#f4f4f4;min-height:38px;padding:10px 14px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none}.tab.active{background:var(--surface);position:relative;top:1px}.info-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.provision-code{margin-bottom:18px}.info-row{border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}.info-row span{display:block;color:var(--muted);font-size:12px;margin-bottom:7px}.info-row strong{display:block;font:600 14px/1.35 ui-monospace,'SFMono-Regular',Consolas,monospace;word-break:break-all}@media(max-width:560px){.info-grid{grid-template-columns:1fr}}"
                   ".btn{border:1px solid var(--line);background:var(--surface);border-radius:6px;min-height:38px;padding:9px 13px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn.warn{background:var(--warn);border-color:var(--warn);color:#fff}.btn-row{display:flex;gap:10px;flex-wrap:wrap}.ok{color:var(--good)}.bad{color:var(--warn)}"
                   "</style></head><body><main>");
   return html;
@@ -2155,6 +2245,10 @@ void sendWifiPage() {
     html += kApName;
     html += F("</strong> 后，在这里选择或输入家里的 Wi-Fi。</p>");
   }
+
+  html += F("<div class='info-grid provision-code'>");
+  appendInfoRow(html, F("设备码"), mcuDeviceCode());
+  html += F("</div>");
 
   html += F("<form method='post' action='/wifi'>");
   if (scannedNetworkCount > 0) {
@@ -2924,6 +3018,77 @@ int16_t decodeImaAdpcmNibble(uint8_t nibble, int *predictor, int *index) {
   if (*index < 0) *index = 0;
   if (*index > 88) *index = 88;
   return static_cast<int16_t>(*predictor);
+}
+
+uint8_t encodeImaAdpcmNibble(int16_t sample, int *predictor, int *index) {
+  int step = kImaAdpcmStepTable[*index];
+  int diff = static_cast<int>(sample) - *predictor;
+  uint8_t nibble = 0;
+  if (diff < 0) {
+    nibble = 8;
+    diff = -diff;
+  }
+
+  int delta = step >> 3;
+  if (diff >= step) {
+    nibble |= 4;
+    diff -= step;
+    delta += step;
+  }
+  if (diff >= (step >> 1)) {
+    nibble |= 2;
+    diff -= step >> 1;
+    delta += step >> 1;
+  }
+  if (diff >= (step >> 2)) {
+    nibble |= 1;
+    delta += step >> 2;
+  }
+
+  *predictor += (nibble & 8) ? -delta : delta;
+  if (*predictor > 32767) *predictor = 32767;
+  if (*predictor < -32768) *predictor = -32768;
+  *index += kImaAdpcmIndexTable[nibble & 0x0f];
+  if (*index < 0) *index = 0;
+  if (*index > 88) *index = 88;
+  return nibble;
+}
+
+size_t encodeVoiceAdpcmChunk(const int16_t *samples,
+                             size_t sampleCount,
+                             int *streamIndex,
+                             uint8_t *output,
+                             size_t outputCapacity) {
+  if (!samples || !streamIndex || !output || sampleCount == 0) return 0;
+  const size_t payloadBytes = sampleCount / 2;
+  const size_t encodedBytes = kMcuAdpcmHeaderBytes + payloadBytes;
+  if (outputCapacity < encodedBytes) return 0;
+
+  memset(output, 0, encodedBytes);
+  memcpy(output, "HADP", 4);
+  output[4] = 1;
+  output[5] = 1;
+  putLe32(output + 8, kVoiceInputSampleRate);
+  putLe32(output + 12, static_cast<uint32_t>(sampleCount));
+  putLe16(output + 16, static_cast<uint16_t>(samples[0]));
+
+  int predictor = samples[0];
+  int index = *streamIndex;
+  if (index < 0) index = 0;
+  if (index > 88) index = 88;
+  output[18] = static_cast<uint8_t>(index);
+  for (size_t i = 1; i < sampleCount; ++i) {
+    const uint8_t nibble = encodeImaAdpcmNibble(samples[i], &predictor, &index);
+    const size_t nibbleOffset = i - 1;
+    const size_t byteOffset = kMcuAdpcmHeaderBytes + (nibbleOffset >> 1);
+    if ((nibbleOffset & 1) == 0) {
+      output[byteOffset] = nibble;
+    } else {
+      output[byteOffset] |= static_cast<uint8_t>(nibble << 4);
+    }
+  }
+  *streamIndex = index;
+  return encodedBytes;
 }
 
 bool flushAdpcmStereo(int16_t *stereo, size_t *frames, uint32_t *playedBytes) {
@@ -3796,6 +3961,29 @@ void handleMcuWebSocketText(uint8_t clientId, const String &message) {
     broadcastMcuStatus();
     return;
   }
+  if (type == F("mcu.remote.disconnected")) {
+    String machineId = jsonStringValue(message, F("machineId"));
+    Serial.printf("Remote MCU target disconnected machine=%s\n", machineId.c_str());
+    lastAudioDetail = F("remote client disconnected");
+    if (mcuAudioPlaying) finishMcuAudio(true);
+    clearMcuAudioQueue();
+    if (mcuInteractionActive) {
+      markMcuInteraction(mcuInteractionId, F("failed"), F("REMOTE OFFLINE"));
+    } else {
+      setLcdStatus(LcdMode::Error, F("REMOTE"), F("OFFLINE"), 0);
+    }
+    disconnectMcuSocketClient();
+    activeDeviceKey = "";
+    activeDeviceUrl = "";
+    mcuAuthToken = "";
+    prefs.begin("mcu", false);
+    prefs.remove("active_key");
+    prefs.remove("active_url");
+    prefs.remove("auth_token");
+    prefs.end();
+    broadcastMcuStatus();
+    return;
+  }
   sendWsJson(clientId, String(F("{\"type\":\"mcu.unknown\",\"ok\":false,\"received\":\"")) +
                            escapeJson(type) + F("\"}"));
 }
@@ -4317,8 +4505,8 @@ bool broadcastMcuVoiceStreamStart(const String &interactionId) {
   json.reserve(280);
   json += F("{\"type\":\"voice.stream.start\",\"interactionId\":\"");
   json += escapeJson(interactionId);
-  json += F("\",\"mimeType\":\"audio/pcm\",\"sampleRate\":");
-  json += kAudioSampleRate;
+  json += F("\",\"mimeType\":\"audio/x-ima-adpcm\",\"frameFormat\":\"hadp-chunk-v1\",\"sampleRate\":");
+  json += kVoiceInputSampleRate;
   json += F(",\"channels\":1,\"bitsPerSample\":16,\"profile\":\"");
   json += escapeJson(selectedProfile);
   json += F("\"}");
@@ -4409,10 +4597,20 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
   i2s_zero_dma_buffer(kI2sPort);
   setLcdStatus(LcdMode::Think, F("LISTEN"), F("SAY NOW"), 0);
 
+  struct VoiceStreamChunk {
+    int16_t samples[kVoiceStreamChunkFrames] = {};
+    uint8_t adpcm[kVoiceStreamAdpcmMaxBytes] = {};
+  };
+
   constexpr size_t kReadBytes = 512;
-  constexpr size_t kPcmChunkFrames = 512;
   uint8_t readBuffer[kReadBytes];
-  int16_t pcmChunk[kPcmChunkFrames];
+  VoiceStreamChunk *pcmChunk = static_cast<VoiceStreamChunk *>(ps_malloc(sizeof(VoiceStreamChunk)));
+  if (!pcmChunk) {
+    audioBusy = false;
+    lastAudioDetail = F("voice stream alloc failed");
+    setLcdStatus(LcdMode::Error, F("VOICE"), F("MEMORY"), 0);
+    return false;
+  }
   size_t pcmChunkFrames = 0;
   uint32_t framesDone = 0;
   uint32_t emptyReads = 0;
@@ -4421,26 +4619,38 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
   uint16_t monoPeak = 0;
   uint64_t monoSquares = 0;
   uint32_t activeSamples = 0;
-  uint32_t sentBytes = 0;
+  VoiceInputChannel inputChannel = VoiceInputChannel::Undecided;
+  uint32_t queuedBytes = 0;
+  int adpcmIndex = 0;
+  auto abortVoiceStream = [&](const String &reason) {
+    broadcastMcuVoiceStreamAbort(interactionId, reason, queuedBytes);
+  };
   const char *stopReason = "max";
   voiceRecordHeardSpeech = false;
   voiceRecordRms = 0;
   voiceRecordPeak = 0;
   voiceRecordActiveSamples = 0;
-  const uint32_t maxFrames = (kAudioSampleRate * kVoiceStreamRecordMs) / 1000UL;
+  const uint32_t maxFrames = (kVoiceInputSampleRate * kVoiceStreamRecordMs) / 1000UL;
   const uint32_t startedAt = millis();
   uint32_t releaseStartedAt = 0;
   uint32_t lastRecordLcdAtMs = startedAt;
   uint8_t lastRecordProgress = 0;
 
-  auto flushPcmChunk = [&]() -> bool {
+  auto queueVoiceChunk = [&]() -> bool {
     if (pcmChunkFrames == 0) return true;
-    size_t bytes = pcmChunkFrames * sizeof(int16_t);
-    uint32_t offset = sentBytes;
-    if (!broadcastMcuVoiceStreamChunk(interactionId, reinterpret_cast<const uint8_t *>(pcmChunk), bytes, offset)) {
+    const size_t encodedBytes = encodeVoiceAdpcmChunk(pcmChunk->samples,
+                                                      pcmChunkFrames,
+                                                      &adpcmIndex,
+                                                      pcmChunk->adpcm,
+                                                      sizeof(pcmChunk->adpcm));
+    if (encodedBytes == 0) return false;
+    if (!broadcastMcuVoiceStreamChunk(interactionId,
+                                      pcmChunk->adpcm,
+                                      encodedBytes,
+                                      queuedBytes)) {
       return false;
     }
-    sentBytes += static_cast<uint32_t>(bytes);
+    queuedBytes += static_cast<uint32_t>(encodedBytes);
     pcmChunkFrames = 0;
     return true;
   };
@@ -4468,6 +4678,7 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
     esp_err_t err = i2s_read(kI2sPort, readBuffer, sizeof(readBuffer), &bytesRead, pdMS_TO_TICKS(40));
     if (err != ESP_OK) {
       audioBusy = false;
+      free(pcmChunk);
       lastAudioDetail = String(F("I2S stream read failed err=")) + String(static_cast<int>(err));
       setLcdStatus(LcdMode::Error, F("I2S"), F("READ FAIL"), 0);
       return false;
@@ -4481,6 +4692,7 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
 
     int16_t *samples = reinterpret_cast<int16_t *>(readBuffer);
     size_t count = bytesRead / sizeof(int16_t);
+    updateVoiceInputChannel(inputChannel, samples, count);
     for (size_t i = 0; i + 1 < count && framesDone < maxFrames; i += 2) {
       int16_t left = samples[i];
       int16_t right = samples[i + 1];
@@ -4489,16 +4701,17 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
       if (leftMag > leftPeak) leftPeak = leftMag;
       if (rightMag > rightPeak) rightPeak = rightMag;
 
-      int16_t mono = shapeVoiceInputSample(right);
+      int16_t mono = voiceInputMonoSample(left, right, inputChannel);
       uint16_t monoMag = sampleMagnitude(mono);
       if (monoMag > monoPeak) monoPeak = monoMag;
       monoSquares += static_cast<uint64_t>(monoMag) * static_cast<uint64_t>(monoMag);
       if (monoMag >= kVoiceVadActiveThreshold) ++activeSamples;
-      pcmChunk[pcmChunkFrames++] = mono;
+      pcmChunk->samples[pcmChunkFrames++] = mono;
       ++framesDone;
 
-      if (pcmChunkFrames >= kPcmChunkFrames && !flushPcmChunk()) {
+      if (pcmChunkFrames >= kVoiceStreamChunkFrames && !queueVoiceChunk()) {
         audioBusy = false;
+        free(pcmChunk);
         lastAudioDetail = F("voice stream chunk send failed");
         return false;
       }
@@ -4514,14 +4727,16 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
     yield();
   }
 
-  if (!flushPcmChunk()) {
+  if (!queueVoiceChunk()) {
     audioBusy = false;
+    free(pcmChunk);
     lastAudioDetail = F("voice stream final send failed");
     return false;
   }
 
   audioBusy = false;
-  if (sentBytes == 0) {
+  free(pcmChunk);
+  if (queuedBytes == 0) {
     lastAudioDetail = String(F("voice stream empty, i2s empty reads=")) + String(emptyReads);
     setLcdStatus(LcdMode::Error, F("MIC"), F("NO DATA"), 0);
     return false;
@@ -4533,16 +4748,20 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
   voiceRecordHeardSpeech = voiceRecordRms >= kVoiceVadRmsStart &&
                            voiceRecordPeak >= kVoiceVadPeakStart &&
                            voiceRecordActiveSamples >= kVoiceVadMinActiveSamples;
-  lastAudioDetail = String(F("voice pcm bytes=")) + String(sentBytes) +
+  lastAudioDetail = String(F("voice adpcm bytes=")) + String(queuedBytes) +
+                    F(", pcm bytes=") + String(framesDone * sizeof(int16_t)) +
                     F(", frames=") + String(framesDone) +
                     F(", rms=") + String(voiceRecordRms) +
                     F(", peak=") + String(voiceRecordPeak) +
-                    F(", active=") + String(voiceRecordActiveSamples);
-  Serial.printf("Voice stream frames=%lu bytes=%lu stop=%s peak L/R/M=%u/%u/%u rms=%lu active=%lu vad=%s\n",
-                static_cast<unsigned long>(framesDone), static_cast<unsigned long>(sentBytes), stopReason,
+                    F(", active=") + String(voiceRecordActiveSamples) +
+                    F(", channel=") + voiceInputChannelName(inputChannel);
+  Serial.printf("Voice stream frames=%lu adpcm=%lu pcm=%lu stop=%s peak L/R/M=%u/%u/%u rms=%lu active=%lu channel=%s vad=%s\n",
+                static_cast<unsigned long>(framesDone), static_cast<unsigned long>(queuedBytes),
+                static_cast<unsigned long>(framesDone * sizeof(int16_t)), stopReason,
                 leftPeak, rightPeak, monoPeak, static_cast<unsigned long>(voiceRecordRms),
-                static_cast<unsigned long>(voiceRecordActiveSamples), voiceRecordHeardSpeech ? "true" : "false");
-  broadcastMcuVoiceStreamEnd(interactionId, sentBytes);
+                static_cast<unsigned long>(voiceRecordActiveSamples), voiceInputChannelName(inputChannel),
+                voiceRecordHeardSpeech ? "true" : "false");
+  broadcastMcuVoiceStreamEnd(interactionId, queuedBytes);
   return true;
 }
 
@@ -4621,6 +4840,15 @@ void triggerBootVoiceTurn() {
     Serial.println(F("Voice trigger failed: WIFI OFFLINE"));
     return;
   }
+  if (mcuAuthToken.length() == 0 || activeDeviceUrl.length() == 0 || selectedProfile.length() == 0) {
+    lastAudioDetail = F("MCU login required before recording");
+    setLcdStatus(LcdMode::Error, F("LOGIN"), F("REQUIRED"), 0);
+    Serial.printf("Voice trigger blocked: LOGIN REQUIRED url=%d token=%d profile=%d\n",
+                  activeDeviceUrl.length() > 0 ? 1 : 0,
+                  mcuAuthToken.length() > 0 ? 1 : 0,
+                  selectedProfile.length() > 0 ? 1 : 0);
+    return;
+  }
 
   String interruptedInteractionId = mcuInteractionId;
   if (mcuAudioPlaying) {
@@ -4636,18 +4864,6 @@ void triggerBootVoiceTurn() {
   }
 
   String interactionId = String(F("mcu-voice-")) + millis();
-  if (activeDeviceUrl.length() == 0 || mcuAuthToken.length() == 0) {
-    markMcuInteraction(interactionId, F("failed"), F("NO DEVICE"));
-    Serial.println(F("Voice trigger failed: NO DEVICE"));
-    enqueueNoDevicePrompt(interactionId);
-    return;
-  }
-  if (selectedProfile.length() == 0) {
-    markMcuInteraction(interactionId, F("failed"), F("NO PROFILE"));
-    Serial.println(F("Voice trigger failed: NO PROFILE"));
-    broadcastMcuStatus();
-    return;
-  }
   if (!waitForMcuSocketReady(8000)) {
     markMcuInteraction(interactionId, F("failed"), F("SOCKET OFF"));
     Serial.printf("Voice trigger failed: SOCKET OFF activeUrl=%s token=%d profile=%s connected=%d namespace=%d\n",
@@ -5108,7 +5324,7 @@ bool connectWifiCredentials(const String &ssid, const String &pass, wifi_mode_t 
     wifiDisconnectedSinceMs = 0;
     if (mode == WIFI_STA) setupApMode = false;
     connectMcuSocketClient();
-    setLcdStatus(LcdMode::Ready, F("ONLINE"), WiFi.localIP().toString(), 100);
+    showLanIpOnLcd();
     Serial.printf("WiFi connected ssid=%s ip=%s\n", ssid.c_str(), WiFi.localIP().toString().c_str());
     esp_rom_printf("WiFi connected ssid=%s ip=%s\n", ssid.c_str(), WiFi.localIP().toString().c_str());
   } else {
@@ -5290,7 +5506,7 @@ void tickMcuInteraction() {
     mcuToolPreview = "";
     mcuToolStatus = "";
     if (wifiReady && WiFi.status() == WL_CONNECTED) {
-      setLcdStatus(LcdMode::Ready, F("ONLINE"), WiFi.localIP().toString(), 100);
+      showLanIpOnLcd();
     } else {
       setLcdStatus(LcdMode::Ready, F("READY"), F(""), 0);
     }
@@ -5391,6 +5607,7 @@ void loop() {
   server.handleClient();
   if (wsReady) mcuSocketLoop();
   tickMcuInteraction();
+  tickLcdStatusReturn();
   if (petChangePending) {
     petChangePending = false;
     Serial.println(F("Processing pet change refresh"));
