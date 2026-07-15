@@ -1471,9 +1471,62 @@ uint16_t sampleMagnitude(int16_t sample) {
   return sample == INT16_MIN ? 32768 : static_cast<uint16_t>(sample < 0 ? -sample : sample);
 }
 
-int16_t voiceInputMonoSample(int16_t left, int16_t right) {
-  (void)left;
-  return shapeVoiceInputSample(right);
+enum class VoiceInputChannel : uint8_t {
+  Undecided,
+  Left,
+  Right,
+  Mixed,
+};
+
+const char *voiceInputChannelName(VoiceInputChannel channel) {
+  switch (channel) {
+    case VoiceInputChannel::Left:
+      return "left";
+    case VoiceInputChannel::Right:
+      return "right";
+    case VoiceInputChannel::Mixed:
+      return "mixed";
+    default:
+      return "undecided";
+  }
+}
+
+void updateVoiceInputChannel(VoiceInputChannel &channel, const int16_t *samples, size_t count) {
+  if (channel != VoiceInputChannel::Undecided || !samples) return;
+
+  uint16_t leftPeak = 0;
+  uint16_t rightPeak = 0;
+  uint64_t leftSquares = 0;
+  uint64_t rightSquares = 0;
+  for (size_t i = 0; i + 1 < count; i += 2) {
+    uint16_t leftMag = sampleMagnitude(samples[i]);
+    uint16_t rightMag = sampleMagnitude(samples[i + 1]);
+    if (leftMag > leftPeak) leftPeak = leftMag;
+    if (rightMag > rightPeak) rightPeak = rightMag;
+    leftSquares += static_cast<uint64_t>(leftMag) * static_cast<uint64_t>(leftMag);
+    rightSquares += static_cast<uint64_t>(rightMag) * static_cast<uint64_t>(rightMag);
+  }
+
+  if (leftPeak < kVoiceVadPeakStart && rightPeak < kVoiceVadPeakStart) return;
+
+  constexpr uint64_t kDominanceRatio = 4;
+  if (leftPeak >= kVoiceVadPeakStart &&
+      (rightPeak < kVoiceVadPeakStart || leftSquares > rightSquares * kDominanceRatio)) {
+    channel = VoiceInputChannel::Left;
+  } else if (rightPeak >= kVoiceVadPeakStart &&
+             (leftPeak < kVoiceVadPeakStart || rightSquares > leftSquares * kDominanceRatio)) {
+    channel = VoiceInputChannel::Right;
+  } else {
+    channel = VoiceInputChannel::Mixed;
+  }
+}
+
+int16_t voiceInputMonoSample(int16_t left, int16_t right, VoiceInputChannel channel) {
+  if (channel == VoiceInputChannel::Left) return shapeVoiceInputSample(left);
+  if (channel == VoiceInputChannel::Right) return shapeVoiceInputSample(right);
+
+  int32_t mixed = (static_cast<int32_t>(left) + static_cast<int32_t>(right)) / 2;
+  return shapeVoiceInputSample(static_cast<int16_t>(mixed));
 }
 
 void shapePcmBuffer(uint8_t *buffer, size_t length) {
@@ -1598,6 +1651,7 @@ bool recordVoiceWav(uint8_t **outWav, size_t *outLen) {
   uint16_t monoPeak = 0;
   uint64_t monoSquares = 0;
   uint32_t activeSamples = 0;
+  VoiceInputChannel inputChannel = VoiceInputChannel::Undecided;
   const char *stopReason = "max";
   voiceRecordHeardSpeech = false;
   voiceRecordRms = 0;
@@ -1644,6 +1698,7 @@ bool recordVoiceWav(uint8_t **outWav, size_t *outLen) {
 
     int16_t *samples = reinterpret_cast<int16_t *>(readBuffer);
     size_t count = bytesRead / sizeof(int16_t);
+    updateVoiceInputChannel(inputChannel, samples, count);
     for (size_t i = 0; i + 1 < count && framesDone < maxFrames; i += 2) {
       int16_t left = samples[i];
       int16_t right = samples[i + 1];
@@ -1652,7 +1707,7 @@ bool recordVoiceWav(uint8_t **outWav, size_t *outLen) {
       if (leftMag > leftPeak) leftPeak = leftMag;
       if (rightMag > rightPeak) rightPeak = rightMag;
 
-      int16_t mono = voiceInputMonoSample(left, right);
+      int16_t mono = voiceInputMonoSample(left, right, inputChannel);
       uint16_t monoMag = sampleMagnitude(mono);
       if (monoMag > monoPeak) monoPeak = monoMag;
       monoSquares += static_cast<uint64_t>(monoMag) * static_cast<uint64_t>(monoMag);
@@ -1694,11 +1749,13 @@ bool recordVoiceWav(uint8_t **outWav, size_t *outLen) {
                     F("/") + String(monoPeak) +
                     F(", rms=") + String(voiceRecordRms) +
                     F(", active=") + String(voiceRecordActiveSamples) +
+                    F(", channel=") + voiceInputChannelName(inputChannel) +
                     F(", vad=") + (voiceRecordHeardSpeech ? F("speech") : F("quiet"));
-  Serial.printf("Voice record frames=%lu bytes=%lu stop=%s peak L/R/M=%u/%u/%u rms=%lu active=%lu vad=%s\n",
+  Serial.printf("Voice record frames=%lu bytes=%lu stop=%s peak L/R/M=%u/%u/%u rms=%lu active=%lu channel=%s vad=%s\n",
                 static_cast<unsigned long>(framesDone), static_cast<unsigned long>(44 + dataBytes),
                 stopReason, leftPeak, rightPeak, monoPeak, static_cast<unsigned long>(voiceRecordRms),
-                static_cast<unsigned long>(voiceRecordActiveSamples), voiceRecordHeardSpeech ? "speech" : "quiet");
+                static_cast<unsigned long>(voiceRecordActiveSamples), voiceInputChannelName(inputChannel),
+                voiceRecordHeardSpeech ? "speech" : "quiet");
   *outWav = wav;
   *outLen = 44 + dataBytes;
   return framesDone > 0;
@@ -2389,7 +2446,7 @@ String pageStart(const String &title) {
 	                  "h1{font-size:clamp(28px,5vw,44px);line-height:1.05;margin:0 0 10px}h2{font-size:18px;margin:0 0 10px}.lead,.hint{color:var(--muted);line-height:1.6}.lead{font-size:15px;margin:0 0 18px}.hint{font-size:12px;margin:0}.meta{font:12px/1.4 ui-monospace,'SFMono-Regular',Consolas,monospace;color:var(--muted);word-break:break-all}"
 	                  "form{display:grid;gap:12px}.field{display:grid;gap:7px}.label{font-size:12px;color:var(--muted)}input,select{width:100%;min-height:42px;border:1px solid var(--line);border-radius:6px;background:#fff;padding:10px 11px;font:14px/1.2 ui-monospace,'SFMono-Regular',Consolas,monospace;color:var(--ink)}select{appearance:none;-webkit-appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 18px) 18px,calc(100% - 13px) 18px;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:34px}input:focus,select:focus{outline:2px solid #cfcfcf;outline-offset:1px}"
 	                  ".choice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.choice{position:relative;display:block}.choice input{position:absolute;opacity:0;pointer-events:none}.choice-card{height:100%;min-height:96px;border:1px solid var(--line);border-radius:6px;background:#fff;padding:14px 14px 14px 42px;display:grid;align-content:start;gap:6px;cursor:pointer;transition:border-color .15s,background .15s,box-shadow .15s}.choice-dot{position:absolute;left:14px;top:16px;width:16px;height:16px;border:1px solid #aaa;border-radius:50%;background:#fff}.choice-title{font:700 15px/1.2 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif}.choice-copy{font-size:12px;line-height:1.5;color:var(--muted)}.choice-meta{margin-top:2px;font:700 10px/1 ui-monospace,'SFMono-Regular',Consolas,monospace;color:#888;text-transform:uppercase}.choice input:checked+.choice-card{border-color:var(--accent);background:#f7f7f7;box-shadow:inset 0 0 0 1px var(--accent)}.choice input:checked+.choice-card .choice-dot{border-color:var(--accent);box-shadow:inset 0 0 0 4px #fff;background:var(--accent)}.choice input:focus+.choice-card{outline:2px solid #cfcfcf;outline-offset:1px}@media(max-width:560px){.choice-grid{grid-template-columns:1fr}.choice-card{min-height:84px}}"
-	                  ".tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);margin:18px -22px 18px;padding:0 22px}.tab{border:1px solid var(--line);border-bottom:0;border-radius:6px 6px 0 0;background:#f4f4f4;min-height:38px;padding:10px 14px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none}.tab.active{background:var(--surface);position:relative;top:1px}.info-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.info-row{border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}.info-row span{display:block;color:var(--muted);font-size:12px;margin-bottom:7px}.info-row strong{display:block;font:600 14px/1.35 ui-monospace,'SFMono-Regular',Consolas,monospace;word-break:break-all}@media(max-width:560px){.info-grid{grid-template-columns:1fr}}"
+	                  ".tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);margin:18px -22px 18px;padding:0 22px}.tab{border:1px solid var(--line);border-bottom:0;border-radius:6px 6px 0 0;background:#f4f4f4;min-height:38px;padding:10px 14px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none}.tab.active{background:var(--surface);position:relative;top:1px}.info-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.provision-code{margin-bottom:18px}.info-row{border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}.info-row span{display:block;color:var(--muted);font-size:12px;margin-bottom:7px}.info-row strong{display:block;font:600 14px/1.35 ui-monospace,'SFMono-Regular',Consolas,monospace;word-break:break-all}@media(max-width:560px){.info-grid{grid-template-columns:1fr}}"
 	                  ".btn{border:1px solid var(--line);background:var(--surface);border-radius:6px;min-height:38px;padding:9px 13px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn.warn{background:var(--warn);border-color:var(--warn);color:#fff}.btn-row{display:flex;gap:10px;flex-wrap:wrap}.ok{color:var(--good)}.bad{color:var(--warn)}"
 	                  "</style></head><body><main>");
   return html;
@@ -2418,6 +2475,10 @@ void sendWifiPage() {
     html += kApName;
     html += F("</strong> 后，在这里选择或输入家里的 Wi-Fi。</p>");
   }
+
+  html += F("<div class='info-grid provision-code'>");
+  appendInfoRow(html, F("设备码"), mcuDeviceCode());
+  html += F("</div>");
 
   html += F("<form method='post' action='/wifi'>");
   if (scannedNetworkCount > 0) {
@@ -4717,6 +4778,7 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
   uint16_t monoPeak = 0;
   uint64_t monoSquares = 0;
   uint32_t activeSamples = 0;
+  VoiceInputChannel inputChannel = VoiceInputChannel::Undecided;
   uint32_t queuedBytes = 0;
   int adpcmIndex = 0;
   auto abortVoiceStream = [&](const String &reason) {
@@ -4802,6 +4864,7 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
 
     int16_t *samples = reinterpret_cast<int16_t *>(readBuffer);
     size_t count = bytesRead / sizeof(int16_t);
+    updateVoiceInputChannel(inputChannel, samples, count);
     for (size_t i = 0; i + 1 < count && framesDone < maxFrames; i += 2) {
       int16_t left = samples[i];
       int16_t right = samples[i + 1];
@@ -4810,7 +4873,7 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
       if (leftMag > leftPeak) leftPeak = leftMag;
       if (rightMag > rightPeak) rightPeak = rightMag;
 
-      int16_t mono = voiceInputMonoSample(left, right);
+      int16_t mono = voiceInputMonoSample(left, right, inputChannel);
       uint16_t monoMag = sampleMagnitude(mono);
       if (monoMag > monoPeak) monoPeak = monoMag;
       monoSquares += static_cast<uint64_t>(monoMag) * static_cast<uint64_t>(monoMag);
@@ -4865,12 +4928,14 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
                     F(", frames=") + String(framesDone) +
                     F(", rms=") + String(voiceRecordRms) +
                     F(", peak=") + String(voiceRecordPeak) +
-                    F(", active=") + String(voiceRecordActiveSamples);
-  Serial.printf("Voice stream frames=%lu adpcm=%lu pcm=%lu stop=%s peak L/R/M=%u/%u/%u rms=%lu active=%lu vad=%s\n",
+                    F(", active=") + String(voiceRecordActiveSamples) +
+                    F(", channel=") + voiceInputChannelName(inputChannel);
+  Serial.printf("Voice stream frames=%lu adpcm=%lu pcm=%lu stop=%s peak L/R/M=%u/%u/%u rms=%lu active=%lu channel=%s vad=%s\n",
                 static_cast<unsigned long>(framesDone), static_cast<unsigned long>(queuedBytes),
                 static_cast<unsigned long>(framesDone * sizeof(int16_t)), stopReason,
                 leftPeak, rightPeak, monoPeak, static_cast<unsigned long>(voiceRecordRms),
-                static_cast<unsigned long>(voiceRecordActiveSamples), voiceRecordHeardSpeech ? "true" : "false");
+                static_cast<unsigned long>(voiceRecordActiveSamples), voiceInputChannelName(inputChannel),
+                voiceRecordHeardSpeech ? "true" : "false");
   broadcastMcuVoiceStreamEnd(interactionId, queuedBytes);
   return true;
 }
