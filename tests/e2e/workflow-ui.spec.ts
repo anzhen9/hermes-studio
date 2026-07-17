@@ -89,8 +89,12 @@ test('workflow canvas exposes orchestration editing and portability controls', a
   const evidenceList = evidence.locator('.workflow-evidence-list')
   await expect(evidenceList).toHaveCSS('overflow-y', 'auto')
   expect(await evidenceList.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true)
-  await evidence.getByText('Technical information', { exact: true }).first().click()
-  await expect(evidence.getByText('a-b', { exact: true }).first()).toBeVisible()
+  await evidence.locator('.workflow-evidence-row').first().click()
+  const evidenceDetailModal = page.getByTestId('workflow-evidence-detail-modal')
+  await expect(evidenceDetailModal).toBeVisible()
+  await expect(evidenceDetailModal.getByText('a-b', { exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(evidenceDetailModal).toBeHidden()
   await page.locator('.workflow-run-item').click()
   const joinHelpIcons = page.getByTestId('workflow-node-join-help')
   const joinHelp = page.getByText('All incoming routes must be taken; if one does not match, this node is skipped. Example: wait for both parallel checks.', { exact: true })
@@ -233,6 +237,64 @@ test('workflow canvas exposes orchestration editing and portability controls', a
   await expect(page.locator('.vue-flow__node')).toHaveCount(2)
   await expect(page.locator('.vue-flow__edge')).toHaveCount(1)
   expect(api.unexpectedRequests).toEqual([])
+})
+
+
+test('workflow execution details explain an upstream business blocker before raw routing codes', async ({ page }) => {
+  await authenticate(page, TEST_ACCESS_KEY, 'research')
+  const nodes = [
+    { id: 'publish', type: 'agent', position: { x: 80, y: 80 }, data: { title: 'Publish release', agent: 'hermes', input: 'Publish', skills: [], images: [], approvalRequired: false } },
+    { id: 'verify', type: 'agent', position: { x: 420, y: 80 }, data: { title: 'Verify release', agent: 'hermes', input: 'Verify', skills: [], images: [], approvalRequired: false } },
+    { id: 'fallback', type: 'agent', position: { x: 420, y: 260 }, data: { title: 'Notify fallback', agent: 'hermes', input: 'Notify', skills: [], images: [], approvalRequired: false } },
+  ]
+  const edges = [
+    { id: 'publish-verify', source: 'publish', target: 'verify', sourceHandle: 'output', targetHandle: 'input', type: 'smoothstep', data: { orchestration: { route: 'success', condition: { path: 'output', operator: 'contains', value: 'PUBLISHED' } } } },
+    { id: 'publish-fallback', source: 'publish', target: 'fallback', sourceHandle: 'output', targetHandle: 'input', type: 'smoothstep', data: { orchestration: { route: 'failure' } } },
+  ]
+  await mockHermesApi(page, { workflows: [{
+    id: 'wf-release', name: 'Release workflow', profile: 'research', workspace: null,
+    nodes, edges, viewport: { x: 80, y: 80, zoom: .75 }, created_at: 1, updated_at: 1,
+  }], workflowRuns: [{
+    id: 'run-blocked', workflow_id: 'wf-release', profile: 'research', workspace: null, start_node_ids: ['publish'], status: 'completed',
+    snapshot_nodes: nodes, snapshot_edges: edges, compiled_loops: [], started_at: 1, finished_at: 2, created_at: 1, error: null,
+    node_sessions: [],
+    edge_evaluations: [{
+      id: 'evaluation-1', run_id: 'run-blocked', workflow_id: 'wf-release', edge_id: 'publish-verify',
+      source_node_id: 'publish', source_execution_id: 'publish', iteration_path: [], target_node_id: 'verify',
+      source_outcome: 'success', status: 'not_taken', route: 'success', reason: 'condition_not_matched', sequence: 1,
+      orchestration: { route: 'success', condition: { path: 'output', operator: 'contains', value: 'PUBLISHED' } },
+      condition_evaluation: { status: 'not_matched', reason: 'not_equal', actual: '\n```json\n{"decision":"BLOCKED","route_marker":"BLOCKED","reason":"The release lock was missing before publication."}\n```' },
+      evaluated_at: 2,
+    }, {
+      id: 'evaluation-2', run_id: 'run-blocked', workflow_id: 'wf-release', edge_id: 'publish-fallback',
+      source_node_id: 'publish', source_execution_id: 'publish', iteration_path: [], target_node_id: 'fallback',
+      source_outcome: 'success', status: 'not_taken', route: 'failure', reason: 'route_not_matched', sequence: 2,
+      orchestration: { route: 'failure' },
+      condition_evaluation: { actual: JSON.stringify({ decision: 'BLOCKED', reason: 'The release lock was missing before publication.' }) },
+      evaluated_at: 2,
+    }],
+    loop_epochs: [],
+  }] })
+
+  await page.goto('/#/hermes/workflow')
+  await page.locator('.workflow-run-item').click()
+  const evidence = page.getByLabel('Workflow execution details')
+  await evidence.getByRole('button', { name: /Execution details/ }).click()
+
+  const blockerText = 'Publish release stopped the workflow (BLOCKED): The release lock was missing before publication. Continuing required “PUBLISHED”, but the upstream result was “BLOCKED”, so “Verify release” was not run.'
+  await expect(evidence.getByText(blockerText, { exact: true })).toBeVisible()
+  await expect(evidence.getByText('not_taken', { exact: true })).toHaveCount(0)
+  const blockerRow = evidence.locator('.workflow-evidence-row').filter({ hasText: blockerText })
+  await blockerRow.click()
+  const detailModal = page.getByTestId('workflow-evidence-detail-modal')
+  await expect(detailModal).toBeVisible()
+  await expect(detailModal.getByText(blockerText, { exact: true })).toBeVisible()
+  await expect(detailModal.getByText('Not used (not_taken)', { exact: true })).toBeVisible()
+  await expect(detailModal.getByText('Continued after success (success)', { exact: true })).toBeVisible()
+  await expect(detailModal.getByText('Condition did not match (condition_not_matched)', { exact: true })).toBeVisible()
+  await expect(detailModal.getByText('PUBLISHED', { exact: true })).toBeVisible()
+  await expect(detailModal.getByText('BLOCKED', { exact: true })).toBeVisible()
+  await expect(evidence.getByText('Route did not match', { exact: true })).toBeVisible()
 })
 
 
