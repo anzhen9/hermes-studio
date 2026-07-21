@@ -16,22 +16,43 @@ export interface WorkflowEvidenceRow {
   conditionPath?: string
   conditionOperator?: string
   expectedValue?: string
-  actualValue?: string
+  conditionActualValue?: string
+  conditionMatched?: boolean
   businessDecision?: string
+  businessGate?: string
   businessReason?: string
+  loopTitle?: string
   iteration?: number
   exitReason?: string | null
   error?: string | null
 }
 
-export function formatIterationPath(raw: unknown): string {
+export interface WorkflowEvidenceSummary {
+  businessDecision?: string
+  businessGate?: string
+  businessReason?: string
+  takenEdges: WorkflowEvidenceRow[]
+  actualPathEdges: WorkflowEvidenceRow[]
+  notTakenEdges: WorkflowEvidenceRow[]
+  supplementalRows: WorkflowEvidenceRow[]
+  otherRows: WorkflowEvidenceRow[]
+}
+
+export type WorkflowEdgePlaybackState =
+  | 'idle' | 'inactive'
+  | 'flowing' | 'completed'
+  | 'blocked-flowing' | 'blocked'
+  | 'failed-flowing' | 'failed'
+
+export function formatIterationPath(raw: unknown, loopTitles = new Map<string, string>()): string {
   if (!Array.isArray(raw) || raw.length === 0) return '—'
   const values = raw.map(item => item && typeof item === 'object' ? item as Record<string, unknown> : {})
   const scopes = [...new Set(values.flatMap(value => typeof value.executionScope === 'string' ? [value.executionScope] : []))]
   const path = values.flatMap(value => {
     if (typeof value.loopId !== 'string') return []
     const iteration = Number.isInteger(value.iteration) ? Number(value.iteration) + 1 : '?'
-    return [`${value.loopId}#${iteration}`]
+    const loopId = value.loopId
+    return [`${loopTitles.get(loopId) || loopId}#${iteration}`]
   }).join(' / ')
   if (scopes.length > 0 && path) return `${scopes.join(' / ')} · ${path}`
   return scopes.length > 0 ? scopes.join(' / ') : path || '—'
@@ -55,14 +76,28 @@ function workflowNodeTitleMap(snapshotNodes: unknown[] | undefined): Map<string,
     const node = raw as Record<string, unknown>
     if (typeof node.id !== 'string') continue
     const data = node.data && typeof node.data === 'object' ? node.data as Record<string, unknown> : {}
-    const title = typeof data.title === 'string' && data.title.trim() ? data.title.trim() : node.id
-    titles.set(node.id, title)
+    const title = typeof data.title === 'string' && data.title.trim() ? data.title.trim() : undefined
+    if (title) titles.set(node.id, title)
   }
   return titles
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+function workflowLoopTitleMap(snapshotNodes: unknown[] | undefined, compiledLoops: unknown[] | undefined): Map<string, string> {
+  const nodeTitles = workflowNodeTitleMap(snapshotNodes)
+  const titles = new Map<string, string>()
+  for (const raw of compiledLoops || []) {
+    const loop = recordValue(raw)
+    const loopId = nonEmptyText(loop?.id)
+    if (!loopId) continue
+    const selectedNodeId = nodeTitles.has(loopId) ? loopId : nonEmptyText(loop?.headerNodeId)
+    const title = selectedNodeId ? nodeTitles.get(selectedNodeId) : undefined
+    if (title) titles.set(loopId, title)
+  }
+  return titles
 }
 
 function nonEmptyText(value: unknown): string | undefined {
@@ -81,10 +116,17 @@ function boundedSummaryText(value: unknown, maxLength = 600): string | undefined
 }
 
 function displayValue(value: unknown): string | undefined {
-  if (typeof value === 'string') return boundedSummaryText(value, 240)
+  if (typeof value === 'string') {
+    const normalized = value
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    return normalized.length > 240 ? `${normalized.slice(0, 237).trimEnd()}...` : normalized
+  }
   if (value === undefined) return undefined
   try {
     const serialized = JSON.stringify(value)
+    if (serialized === undefined) return undefined
     return serialized.length > 240 ? `${serialized.slice(0, 237)}...` : serialized
   } catch {
     return String(value)
@@ -95,29 +137,28 @@ function parseBusinessResult(value: unknown): Record<string, unknown> | null {
   const direct = recordValue(value)
   if (direct) return direct
   if (typeof value !== 'string') return null
-  const candidates: string[] = []
-  const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i)
-  if (fenced?.[1]) candidates.push(fenced[1].trim())
   const trimmed = value.trim()
-  if (trimmed.startsWith('{') && trimmed.endsWith('}')) candidates.push(trimmed)
-  const firstBrace = value.indexOf('{')
-  const lastBrace = value.lastIndexOf('}')
-  if (firstBrace >= 0 && lastBrace > firstBrace) candidates.push(value.slice(firstBrace, lastBrace + 1))
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate)
-      const record = recordValue(parsed)
-      if (record) return record
-    } catch {
-      // Keep the raw condition value when the output is not JSON.
-    }
+  if (!trimmed) return null
+  try {
+    return recordValue(JSON.parse(trimmed))
+  } catch {
+    // Match the runtime contract for one explicit JSON fence.
   }
-  return null
+
+  const fenceOpenings = [...trimmed.matchAll(/```json\b/gi)]
+  if (fenceOpenings.length !== 1) return null
+  const fencedJson = [...trimmed.matchAll(/```json\s*([\s\S]*?)```/gi)]
+  if (fencedJson.length !== 1) return null
+  try {
+    return recordValue(JSON.parse(fencedJson[0][1].trim()))
+  } catch {
+    return null
+  }
 }
 
 function businessReason(result: Record<string, unknown> | null): string | undefined {
   if (!result) return undefined
-  const direct = boundedSummaryText(result.reason) || boundedSummaryText(result.message) || boundedSummaryText(result.error)
+  const direct = boundedSummaryText(result.reason) || boundedSummaryText(result.root_cause) || boundedSummaryText(result.message) || boundedSummaryText(result.error)
   if (direct) return direct
   if (Array.isArray(result.blocking_reasons)) {
     const reasons = result.blocking_reasons
@@ -128,16 +169,20 @@ function businessReason(result: Record<string, unknown> | null): string | undefi
   return undefined
 }
 
-export function buildWorkflowEvidenceRows(run: Pick<WorkflowRunRecord, 'snapshot_nodes' | 'node_sessions' | 'edge_evaluations' | 'loop_epochs'>): WorkflowEvidenceRow[] {
+export function buildWorkflowEvidenceRows(
+  run: Pick<WorkflowRunRecord, 'snapshot_nodes' | 'node_sessions' | 'edge_evaluations' | 'loop_epochs'>
+    & Partial<Pick<WorkflowRunRecord, 'compiled_loops'>>,
+): WorkflowEvidenceRow[] {
   const rows: WorkflowEvidenceRow[] = []
   const nodeTitles = workflowNodeTitleMap(run.snapshot_nodes)
-  const nodeTitle = (nodeId: string) => nodeTitles.get(nodeId) || nodeId
+  const loopTitles = workflowLoopTitleMap(run.snapshot_nodes, run.compiled_loops)
+  const nodeTitle = (nodeId: string) => nodeTitles.get(nodeId)
   const exceptionalNodeStatuses = new Set(['failed', 'blocked', 'approval_rejected', 'canceled'])
   for (const node of run.node_sessions || []) {
     if (!exceptionalNodeStatuses.has(node.status)) continue
     rows.push({
       kind: 'node', sequence: node.sequence, technicalId: node.execution_id, status: node.status,
-      nodeTitle: nodeTitle(node.node_id), error: node.error, iterationPath: formatIterationPath(node.iteration_path),
+      nodeTitle: nodeTitle(node.node_id), error: node.error, iterationPath: formatIterationPath(node.iteration_path, loopTitles),
     })
   }
   for (const edge of run.edge_evaluations || []) {
@@ -145,24 +190,78 @@ export function buildWorkflowEvidenceRows(run: Pick<WorkflowRunRecord, 'snapshot
     const condition = recordValue(orchestration?.condition)
     const evaluation = recordValue(edge.condition_evaluation)
     const actual = evaluation?.actual
+    const hasConditionActual = Boolean(evaluation && Object.prototype.hasOwnProperty.call(evaluation, 'actual'))
     const result = parseBusinessResult(actual)
-    const decision = boundedSummaryText(result?.decision, 80)
-    const routeMarker = boundedSummaryText(result?.route_marker, 80)
+    const conditionPath = nonEmptyText(condition?.path)
+    const decisionField = conditionPath === 'outputJson.decision' || conditionPath === 'outputJson.route_marker'
+    const decision = decisionField
+      ? boundedSummaryText(actual, 80)
+      : boundedSummaryText(result?.decision, 80)
+    const evaluationStatus = nonEmptyText(evaluation?.status)
     rows.push({
       kind: 'edge', sequence: edge.sequence, technicalId: edge.edge_id, status: edge.status,
       sourceTitle: nodeTitle(edge.source_node_id), targetTitle: nodeTitle(edge.target_node_id),
       route: edge.route, reason: edge.reason, sourceOutcome: edge.source_outcome,
-      conditionPath: nonEmptyText(condition?.path), conditionOperator: nonEmptyText(condition?.operator),
+      conditionPath, conditionOperator: nonEmptyText(condition?.operator),
       expectedValue: displayValue(condition?.value),
-      actualValue: routeMarker || decision || displayValue(actual),
+      conditionActualValue: hasConditionActual ? (actual === undefined ? 'undefined' : displayValue(actual)) : undefined,
+      conditionMatched: evaluationStatus === 'matched' ? true : evaluationStatus === 'not_matched' ? false : undefined,
       businessDecision: decision,
+      businessGate: boundedSummaryText(result?.failed_gate, 120),
       businessReason: businessReason(result),
-      iterationPath: formatIterationPath(edge.iteration_path),
+      iterationPath: formatIterationPath(edge.iteration_path, loopTitles),
     })
   }
   for (const loop of run.loop_epochs || []) rows.push({
     kind: 'loop', sequence: loop.sequence, technicalId: loop.loop_id, status: loop.status,
-    iteration: loop.iteration, exitReason: loop.exit_reason, iterationPath: formatIterationPath(loop.iteration_path),
+    loopTitle: loopTitles.get(loop.loop_id), iteration: loop.iteration, exitReason: loop.exit_reason,
+    iterationPath: formatIterationPath(loop.iteration_path, loopTitles),
   })
   return rows.sort((a, b) => a.sequence - b.sequence || a.kind.localeCompare(b.kind) || a.technicalId.localeCompare(b.technicalId))
+}
+
+export function summarizeWorkflowEvidenceRows(rows: WorkflowEvidenceRow[]): WorkflowEvidenceSummary {
+  const takenEdges = rows.filter(row => row.kind === 'edge' && row.status === 'taken')
+  const notTakenEdges = rows.filter(row => row.kind === 'edge' && row.status !== 'taken')
+  const nonEdgeRows = rows.filter(row => row.kind !== 'edge')
+  const actualPathEdges = takenEdges.filter((row, index) => takenEdges.findIndex(candidate => (
+    candidate.technicalId === row.technicalId
+      && candidate.sourceTitle === row.sourceTitle
+      && candidate.targetTitle === row.targetTitle
+  )) === index)
+  const businessRow = takenEdges.find(row => row.businessDecision || row.businessGate || row.businessReason)
+    || notTakenEdges.find(row => row.businessDecision || row.businessGate || row.businessReason)
+    || nonEdgeRows.find(row => row.businessDecision || row.businessGate || row.businessReason)
+  return {
+    businessDecision: businessRow?.businessDecision,
+    businessGate: businessRow?.businessGate,
+    businessReason: businessRow?.businessReason,
+    takenEdges,
+    actualPathEdges,
+    notTakenEdges,
+    supplementalRows: nonEdgeRows,
+    otherRows: [...notTakenEdges, ...nonEdgeRows],
+  }
+}
+
+export function workflowEdgePlaybackState(
+  edgeId: string,
+  targetNodeStatus: string,
+  runStatus: string,
+  rows: WorkflowEvidenceRow[],
+): WorkflowEdgePlaybackState {
+  const evidenceRows = rows.filter(row => row.kind === 'edge' && row.technicalId === edgeId)
+  if (evidenceRows.length === 0) return 'idle'
+  const takenRows = evidenceRows.filter(row => row.status === 'taken')
+  if (takenRows.length === 0) return evidenceRows.some(row => row.status === 'error') ? 'failed' : 'inactive'
+
+  const latestTaken = takenRows[takenRows.length - 1]
+  const summary = summarizeWorkflowEvidenceRows(rows)
+  const businessBlocked = summary.businessGate || summary.businessDecision?.trim().toUpperCase() === 'BLOCKED'
+  const failedPath = latestTaken.sourceOutcome === 'failure'
+    || ['failed', 'blocked', 'approval_rejected', 'canceled'].includes(targetNodeStatus)
+  const active = ['queued', 'running', 'pending_approval'].includes(targetNodeStatus)
+    || (targetNodeStatus === 'idle' && (runStatus === 'queued' || runStatus === 'running'))
+  if (active) return failedPath ? 'failed-flowing' : businessBlocked ? 'blocked-flowing' : 'flowing'
+  return failedPath ? 'failed' : businessBlocked ? 'blocked' : 'completed'
 }

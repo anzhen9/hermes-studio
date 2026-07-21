@@ -57,6 +57,16 @@ export interface QueuedRun {
   originSocketId?: string
   goalContinuation?: boolean
   reasoningEffort?: string
+  backgroundDelegationId?: string
+  backgroundClaimId?: string
+  autonomous?: boolean
+}
+
+export interface BackgroundDelegationState {
+  delegationId: string
+  status: 'running' | 'delivering' | 'completed' | 'failed' | 'interrupted'
+  profile?: string
+  updatedAt: number
 }
 
 export interface SessionState {
@@ -80,6 +90,7 @@ export interface SessionState {
   responseRun?: ResponseRunState
   source?: ChatRunSource
   bridgePendingAssistantContent?: string
+  bridgeAssistantMessageId?: string
   bridgePendingReasoningContent?: string
   bridgePendingToolCallMarkup?: string
   bridgeOutput?: string
@@ -91,6 +102,8 @@ export interface SessionState {
     startedAt: number
   }>
   bridgeCompressionResults?: Record<string, BridgeCompressionResult>
+  backgroundTasks?: Record<string, Record<string, unknown>>
+  backgroundDelegations?: Record<string, BackgroundDelegationState>
 }
 
 export interface ResponseRunState {
