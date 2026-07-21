@@ -534,6 +534,7 @@ class ChatStorage {
                 ...args.draft,
                 room_id: args.roomId,
                 message_id: messageId,
+                assistant_message_id: args.parentMessageId || '',
                 workspace: workspaceLabel,
             }
             const change = insertWorkspaceRunChange(db, redactedDraft)
@@ -1097,6 +1098,7 @@ export class GroupChatServer {
                         name: agent.name,
                         description: agent.description,
                         invited: agent.invited,
+                        backgroundDelegationEnabled: false,
                     })
                     await this.agentClients.addAgentToRoom(room.id, client)
                     total++

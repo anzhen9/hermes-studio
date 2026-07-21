@@ -17,9 +17,13 @@ import { useVoiceSettings } from '@/composables/useVoiceSettings'
 import { speedToEdgeRate, hzToEdgePitch } from '@/utils/ttsHelpers'
 import { getDownloadUrl } from '@/api/hermes/download'
 import { formatChatTimestamp } from '@/utils/chat-timestamp'
-import type { ChatMessage, RoomAgent, MemberInfo } from '@/api/hermes/group-chat'
+import type { ChatMessage, GroupWorkspaceDiffFile, GroupWorkspaceDiffPayload, RoomAgent, MemberInfo } from '@/api/hermes/group-chat'
 import { useGroupChatStore } from '@/stores/hermes/group-chat'
 import { formatReferencedContentForDisplay, parseMessageReference } from '@/stores/hermes/chat'
+import { isPreviewableFile } from '@/utils/hermes/file-preview'
+import ToolChangeCard from '@/components/hermes/chat/ToolChangeCard.vue'
+import { useFilesStore } from '@/stores/hermes/files'
+import { useToolPanelStore } from '@/stores/hermes/tool-panel'
 
 const MarkdownRenderer = defineAsyncComponent(async () => (await import('../chat/MarkdownRenderer.vue')).default)
 
@@ -42,6 +46,8 @@ const { t } = useI18n()
 const toast = useMessage()
 const groupChatStore = useGroupChatStore()
 const profilesStore = useProfilesStore()
+const filesStore = useFilesStore()
+const toolPanelStore = useToolPanelStore()
 const speech = useGlobalSpeech()
 const voiceSettings = useVoiceSettings()
 const previewUrl = ref<string | null>(null)
@@ -157,6 +163,7 @@ const renderedAttachments = computed(() => {
             type: block.type === 'image' ? String(block.media_type || 'image/*') : String(block.media_type || 'application/octet-stream'),
             size: 0,
             url: getDownloadUrl(normalizeLocalFilePath(path), name),
+            path: normalizeLocalFilePath(path),
         }]
     })
 })
@@ -199,6 +206,7 @@ const quotableContent = computed(() => {
 })
 
 const toolExpanded = ref(false)
+const expandedWorkspaceChangeIds = ref(new Set<string>())
 const isToolMessage = computed(() => props.message.role === 'tool')
 const workspaceDiffPayload = computed(() => {
     if ((props.message.toolName || props.message.tool_name) !== 'workspace_diff') return null
@@ -216,7 +224,8 @@ const workspaceDiffPayload = computed(() => {
     return null
 })
 const workspaceDiffFiles = computed(() => Array.isArray(workspaceDiffPayload.value?.files) ? workspaceDiffPayload.value.files : [])
-const workspaceDiffLabel = computed(() => workspaceDiffPayload.value?.workspace_basename || t('chat.workspace'))
+const assistantWorkspaceChanges = computed(() => props.message.workspaceChanges || [])
+const selectedWorkspaceDiffFileId = computed(() => toolPanelStore.workspaceDiff?.file.id ?? null)
 const toolArgsPayload = computed(() => formatToolPayload(props.message.toolArgs))
 const toolResultPayload = computed(() => formatToolPayload(props.message.toolResult, true))
 const hasToolDetails = computed(() => !!(toolArgsPayload.value.full || toolResultPayload.value.full))
@@ -226,6 +235,33 @@ const fullToolResult = computed(() => toolResultPayload.value.full)
 const formattedToolResult = computed(() => toolResultPayload.value.display)
 const renderedToolArgs = computed(() => formattedToolArgs.value ? renderToolPayload(formattedToolArgs.value, toolArgsPayload.value.language) : '')
 const renderedToolResult = computed(() => formattedToolResult.value ? renderToolPayload(formattedToolResult.value, toolResultPayload.value.language) : '')
+
+function isWorkspaceChangeExpanded(changeId: string): boolean {
+    return expandedWorkspaceChangeIds.value.has(changeId)
+}
+
+function toggleWorkspaceChange(changeId: string): void {
+    const next = new Set(expandedWorkspaceChangeIds.value)
+    if (next.has(changeId)) next.delete(changeId)
+    else next.add(changeId)
+    expandedWorkspaceChangeIds.value = next
+}
+
+function openWorkspaceDiffFileForPayload(file: GroupWorkspaceDiffFile, payload: GroupWorkspaceDiffPayload | null): void {
+    if (!payload || !file) return
+    filesStore.closePreview()
+    toolPanelStore.openInlineWorkspaceDiff({
+        id: file.id ?? file.path,
+        path: String(file.path || ''),
+        additions: Number(file.additions || 0),
+        deletions: Number(file.deletions || 0),
+        binary: file.binary === true,
+    }, typeof file.patch === 'string' ? file.patch : null, payload.workspace || payload.workspace_root || '')
+}
+
+function openWorkspaceDiffFile(file: GroupWorkspaceDiffFile): void {
+    openWorkspaceDiffFileForPayload(file, workspaceDiffPayload.value)
+}
 const canPlaySpeech = computed(() => {
     if (props.message.role !== 'assistant') return false
     if (!assistantBody.value.trim()) return false
@@ -507,6 +543,27 @@ function isImage(type: string): boolean {
     return type.startsWith('image/')
 }
 
+function attachmentPath(attachment: { path?: string; url?: string }): string | null {
+    if (attachment.path) return attachment.path
+    try {
+        return new URL(attachment.url || '', window.location.origin).searchParams.get('path')
+    } catch {
+        return null
+    }
+}
+
+function handleAttachmentClick(event: MouseEvent, attachment: { name: string; path?: string; url?: string }): void {
+    if (!isPreviewableFile(attachment.name)) return
+    const path = attachmentPath(attachment)
+    if (!path) return
+    const previewEvent = new CustomEvent('hermes:preview-workspace-file', {
+        cancelable: true,
+        detail: { path, fileName: attachment.name },
+    })
+    window.dispatchEvent(previewEvent)
+    if (previewEvent.defaultPrevented) event.preventDefault()
+}
+
 function normalizeLocalFilePath(path: string): string {
     return /^[a-zA-Z]:\\/.test(path) ? path.replace(/\\/g, '/') : path
 }
@@ -546,50 +603,17 @@ onBeforeUnmount(() => {
                 <span class="sender-name">{{ message.senderName }}</span>
                 <span v-if="isAgent && agentInfo?.description" class="agent-desc">{{ agentInfo.description }}</span>
             </div>
-            <div v-if="workspaceDiffPayload" class="workspace-diff-card">
-                <button
-                    class="workspace-diff-head"
-                    type="button"
-                    :aria-expanded="toolExpanded"
-                    @click="toolExpanded = !toolExpanded"
-                >
-                    <span class="workspace-diff-title-wrap">
-                        <svg
-                            width="12"
-                            height="12"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                            class="workspace-diff-chevron"
-                            :class="{ rotated: toolExpanded }"
-                        >
-                            <polyline points="9 18 15 12 9 6" />
-                        </svg>
-                        <span class="workspace-diff-title">{{ t('chat.workspaceChanges') }}</span>
-                    </span>
-                    <span class="workspace-diff-status">{{ workspaceDiffPayload.status }}</span>
-                </button>
-                <div class="workspace-diff-meta" :title="workspaceDiffLabel">
-                    <span>{{ workspaceDiffLabel }}</span>
-                    <span>{{ t('chat.changedFiles', { files: workspaceDiffPayload.files_changed ?? workspaceDiffFiles.length }) }}</span>
-                    <span class="diff-add">+{{ workspaceDiffPayload.additions || 0 }}</span>
-                    <span class="diff-del">-{{ workspaceDiffPayload.deletions || 0 }}</span>
-                    <span v-if="workspaceDiffPayload.truncated">{{ t('chat.truncated') }}</span>
-                </div>
-                <div v-if="toolExpanded" class="workspace-diff-files" @click="handleToolDetailClick">
-                    <div v-for="file in workspaceDiffFiles" :key="file.id || file.path" class="workspace-diff-file">
-                        <div class="workspace-diff-file-head">
-                            <span class="workspace-diff-path">{{ file.path }}</span>
-                            <span>{{ file.change_type }}</span>
-                            <span class="diff-add">+{{ file.additions || 0 }}</span>
-                            <span class="diff-del">-{{ file.deletions || 0 }}</span>
-                            <span v-if="file.binary">{{ t('chat.binaryFileDiffUnavailable') }}</span>
-                            <span v-if="file.truncated">{{ t('chat.truncated') }}</span>
-                        </div>
-                        <div v-if="file.patch" class="tool-detail-code-block" v-html="renderToolPayload(file.patch, 'diff')"></div>
-                    </div>
-                </div>
+            <div v-if="workspaceDiffPayload" class="tool-detail-section tool-change-standalone">
+                <ToolChangeCard
+                    :files="workspaceDiffFiles"
+                    :files-changed="workspaceDiffPayload.files_changed || 0"
+                    :additions="workspaceDiffPayload.additions || 0"
+                    :deletions="workspaceDiffPayload.deletions || 0"
+                    :expanded="toolExpanded"
+                    :selected-file-id="selectedWorkspaceDiffFileId"
+                    @toggle="toolExpanded = !toolExpanded"
+                    @select="openWorkspaceDiffFile"
+                />
             </div>
             <div v-else class="tool-line" :class="{ expandable: hasToolDetails }" @click="hasToolDetails && (toolExpanded = !toolExpanded)">
                 <svg
@@ -653,7 +677,7 @@ onBeforeUnmount(() => {
                         :class="{ image: isImage(att.type) }"
                     >
                         <img v-if="isImage(att.type)" :src="att.url" :alt="att.name" class="msg-attachment-thumb" @click="previewUrl = att.url" />
-                        <a v-else class="msg-attachment-file" :href="att.url" :title="t('download.downloadFile')">
+                        <a v-else class="msg-attachment-file" :href="att.url" :title="t('download.downloadFile')" @click="handleAttachmentClick($event, att)">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                                 <polyline points="14 2 14 8 20 8" />
@@ -692,6 +716,20 @@ onBeforeUnmount(() => {
                     <MarkdownRenderer v-if="parsedMessageReference.reply" :content="parsedMessageReference.reply" :mention-names="mentionNames" />
                 </template>
                 <MarkdownRenderer v-else-if="displayBody" :content="displayBody" :mention-names="mentionNames" />
+                <ToolChangeCard
+                    v-for="change in assistantWorkspaceChanges"
+                    :key="change.change_id"
+                    class="assistant-workspace-change"
+                    :files="change.files || []"
+                    :files-changed="change.files_changed || 0"
+                    :additions="change.additions || 0"
+                    :deletions="change.deletions || 0"
+                    :expanded="isWorkspaceChangeExpanded(change.change_id)"
+                    :selected-file-id="selectedWorkspaceDiffFileId"
+                    :title="t('chat.changesThisTurn')"
+                    @toggle="toggleWorkspaceChange(change.change_id)"
+                    @select="file => openWorkspaceDiffFileForPayload(file, change)"
+                />
                 <span v-if="message.isStreaming && !displayBody" class="streaming-dots">
                     <span></span><span></span><span></span>
                 </span>
@@ -872,101 +910,15 @@ onBeforeUnmount(() => {
     padding-left: 10px;
 }
 
-.workspace-diff-card {
-    width: min(760px, 100%);
-    border: 1px solid $border-color;
-    border-radius: $radius-sm;
-    background: rgba(var(--accent-primary-rgb), 0.04);
-    overflow: hidden;
-}
-
-.workspace-diff-head,
-.workspace-diff-meta,
-.workspace-diff-file-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+.tool-change-standalone {
+    display: inline-block;
+    max-width: 100%;
     min-width: 0;
+    width: fit-content;
 }
 
-.workspace-diff-head {
-    background: transparent;
-    border: 0;
-    color: inherit;
-    cursor: pointer;
-    justify-content: space-between;
-    padding: 8px 10px;
-    border-bottom: 1px solid $border-color;
-    text-align: left;
-    width: 100%;
-}
-
-.workspace-diff-title-wrap {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-}
-
-.workspace-diff-chevron {
-    flex-shrink: 0;
-    transition: transform 0.15s ease;
-
-    &.rotated {
-        transform: rotate(90deg);
-    }
-}
-
-.workspace-diff-title {
-    font-weight: 700;
-    color: $text-primary;
-}
-
-.workspace-diff-status {
-    font-size: 11px;
-    color: $text-secondary;
-    font-family: $font-code;
-}
-
-.workspace-diff-meta {
-    padding: 6px 10px;
-    font-size: 12px;
-    color: $text-secondary;
-    flex-wrap: wrap;
-}
-
-.workspace-diff-files {
-    display: grid;
-    gap: 8px;
-    padding: 8px 10px 10px;
-}
-
-.workspace-diff-file {
-    min-width: 0;
-}
-
-.workspace-diff-file-head {
-    padding: 4px 0;
-    font-size: 11px;
-    color: $text-muted;
-    font-family: $font-code;
-}
-
-.workspace-diff-path {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: $text-primary;
-}
-
-.diff-add {
-    color: $success;
-}
-
-.diff-del {
-    color: $error;
+.assistant-workspace-change {
+    margin-top: 10px;
 }
 
 .tool-detail-section {
