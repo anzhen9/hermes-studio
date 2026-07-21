@@ -14,6 +14,7 @@ import {
     type RoomInfo,
     type RoomAgent,
     type ChatMessage,
+    type GroupWorkspaceDiffPayload,
     type MemberInfo,
     createRoom,
     listRooms,
@@ -25,6 +26,7 @@ import {
     cloneRoom as cloneRoomApi,
     deleteRoom as deleteRoomApi,
     clearRoomContext,
+    updateInviteCode as updateInviteCodeApi,
     updateRoomWorkspace as updateRoomWorkspaceApi,
 } from '@/api/hermes/group-chat'
 
@@ -827,6 +829,23 @@ const currentUserAvatar = ref('')
         }
     }
 
+    async function setRoomInviteCode(roomId: string, inviteCode: string) {
+        const nextCode = inviteCode.trim()
+        if (!nextCode) throw new Error('inviteCode is required')
+        try {
+            await updateInviteCodeApi(roomId, nextCode)
+            const room = rooms.value.find(r => r.id === roomId)
+            if (room) {
+                room.inviteCode = nextCode
+                rooms.value = [...rooms.value]
+            }
+            return nextCode
+        } catch (err: any) {
+            error.value = err.message
+            throw err
+        }
+    }
+
     // ─── Agent Actions ─────────────────────────────────────
     async function loadAgents(roomId: string) {
         try {
@@ -955,6 +974,7 @@ const currentUserAvatar = ref('')
         cloneRoom,
         clearCurrentRoomContext,
         setRoomWorkspace,
+        setRoomInviteCode,
         loadAgents,
         addAgentToRoom,
         removeAgentFromRoom,
@@ -990,6 +1010,31 @@ function parseWorkspaceDiffPayload(value: unknown): unknown {
     } catch {
         return value
     }
+}
+
+function groupWorkspaceDiffPayload(value: unknown): GroupWorkspaceDiffPayload | null {
+    const parsed = parseWorkspaceDiffPayload(value)
+    return parsed && typeof parsed === 'object' && (parsed as any).kind === 'workspace_diff'
+        ? parsed as GroupWorkspaceDiffPayload
+        : null
+}
+
+function attachWorkspaceDiffsToParentMessages(messages: ChatMessage[]): ChatMessage[] {
+    const mapped: ChatMessage[] = messages.map(message => ({ ...message, workspaceChanges: [] }))
+    const assistantById = new Map(
+        mapped
+            .filter(message => message.role === 'assistant')
+            .map(message => [message.id, message]),
+    )
+    return mapped.filter(message => {
+        if ((message.toolName || message.tool_name) !== 'workspace_diff') return true
+        const payload = groupWorkspaceDiffPayload(message.toolResult ?? message.content)
+        const parentMessageId = String(payload?.parent_message_id || '').trim()
+        const parent = parentMessageId ? assistantById.get(parentMessageId) : undefined
+        if (!payload || !parent) return true
+        parent.workspaceChanges!.push(payload)
+        return false
+    })
 }
 
 function mapGroupMessages(msgs: ChatMessage[]): ChatMessage[] {
@@ -1077,5 +1122,5 @@ function mapGroupMessages(msgs: ChatMessage[]): ChatMessage[] {
 
         result.push(msg)
     }
-    return result
+    return attachWorkspaceDiffsToParentMessages(result)
 }
