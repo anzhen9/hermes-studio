@@ -1,10 +1,23 @@
 <script setup lang="ts">
-import { renameSession, setSessionWorkspace, batchDeleteSessions, exportSession } from "@/api/hermes/sessions";
+import {
+  batchDeleteSessions,
+  createSessionCategory,
+  deleteSessionCategory,
+  exportSession,
+  fetchSessionCategories,
+  renameSession,
+  renameSessionCategory,
+  setSessionCategory,
+  setSessionWorkspace,
+  type SessionCategory,
+} from "@/api/hermes/sessions";
 import type { AvailableModelGroup } from "@/api/hermes/system";
 import { fetchCodingAgentsStatus, inferCodingAgentApiMode, normalizeCodingAgentApiMode, type ChatCodingAgentId, type CodingAgentApiMode, type CodingAgentId } from "@/api/coding-agents";
 import { useChatStore, type Session } from "@/stores/hermes/chat";
 import { useAppStore } from "@/stores/hermes/app";
 import { useProfilesStore } from "@/stores/hermes/profiles";
+import { useFilesStore } from "@/stores/hermes/files";
+import { useToolPanelStore } from "@/stores/hermes/tool-panel";
 import { useSessionBrowserPrefsStore } from "@/stores/hermes/session-browser-prefs";
 import {
   NButton,
@@ -22,7 +35,7 @@ import {
   useMessage,
   type DropdownOption,
 } from "naive-ui";
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { copyToClipboard } from "@/utils/clipboard";
@@ -33,17 +46,25 @@ import ConversationMonitorPane from "./ConversationMonitorPane.vue";
 import MessageList from "./MessageList.vue";
 import SessionListItem from "./SessionListItem.vue";
 import OutlinePanel from "./OutlinePanel.vue";
-import FilesPanel from "./FilesPanel.vue";
 import TerminalPanel from "./TerminalPanel.vue";
+import SubagentStreamPanel from "./SubagentStreamPanel.vue";
+import { buildVisibleSessionCategoryGroups } from "./session-category-groups";
 import PageSidebarNav from "@/components/layout/PageSidebarNav.vue";
 import SettingsCircuitBadge from "@/components/layout/SettingsCircuitBadge.vue";
 import { isStoredSuperAdmin } from "@/api/client";
 import { useDefaultWorkspace } from "@/composables/useDefaultWorkspace";
 import { canScopedCodingAgentUseProvider, usesServerManagedProviderAuth } from "@/utils/codingAgentProviders";
+import { OPEN_SUBAGENT_STREAM_EVENT, type OpenSubagentStreamDetail } from "@/utils/hermes/subagent-stream";
+
+const FilesPanel = defineAsyncComponent(async () => (await import('./FilesPanel.vue')).default);
+const FilePreview = defineAsyncComponent(async () => (await import('@/components/hermes/files/FilePreview.vue')).default);
+const WorkspaceDiffPreview = defineAsyncComponent(async () => (await import('@/components/hermes/files/WorkspaceDiffPreview.vue')).default);
 
 const chatStore = useChatStore();
 const appStore = useAppStore();
 const profilesStore = useProfilesStore();
+const filesStore = useFilesStore();
+const toolPanelStore = useToolPanelStore();
 const sessionBrowserPrefsStore = useSessionBrowserPrefsStore();
 const router = useRouter();
 const message = useMessage();
@@ -61,7 +82,13 @@ const chatDropCounter = ref(0);
 const isChatDropActive = ref(false);
 const showToolPanel = ref(false);
 const activeToolPanel = ref<"files" | "terminal">("files");
+const selectedSubagent = ref<OpenSubagentStreamDetail | null>(null);
+const selectedSubagentStream = computed(() => {
+  const selected = selectedSubagent.value;
+  return selected ? chatStore.getSubagentStream(selected.sessionId, selected.subagentId) : null;
+});
 const activeWorkspaceSessionId = computed(() => chatStore.activeSession?.workspace && !chatStore.activeSession.isLocalOnly ? chatStore.activeSession.id : null);
+const activePreviewSessionId = computed(() => chatStore.activeSession?.id && !chatStore.activeSession.isLocalOnly ? chatStore.activeSession.id : null);
 const activeWorkspacePath = computed(() => chatStore.activeSession?.workspace && !chatStore.activeSession.isLocalOnly ? chatStore.activeSession.workspace : null);
 const TOOL_PANEL_MIN_WIDTH = 360;
 const TOOL_PANEL_DEFAULT_WIDTH = 560;
@@ -178,6 +205,27 @@ function startToolResize(event: PointerEvent) {
   document.body.style.cursor = "col-resize";
 }
 
+function closeToolPanelOverlay(): boolean {
+  if (toolPanelStore.workspaceDiff && filesStore.hasUnsavedChanges) {
+    message.warning(t("files.unsavedChanges"));
+    return false;
+  }
+  if (toolPanelStore.workspaceDiff && filesStore.editingFile) filesStore.closeEditor();
+  filesStore.closePreview();
+  toolPanelStore.closeWorkspaceDiff();
+  selectedSubagent.value = null;
+  showToolPanel.value = false;
+  return true;
+}
+
+function toggleToolPanel() {
+  if (showToolPanel.value) {
+    closeToolPanelOverlay();
+    return;
+  }
+  showToolPanel.value = true;
+}
+
 function hasDraggedFiles(event: DragEvent) {
   return Array.from(event.dataTransfer?.types || []).includes("Files");
 }
@@ -239,22 +287,79 @@ function openPageSidebar() {
   showSessions.value = true;
 }
 
+function workspacePreviewPath(filePath: string): string | null {
+  const workspace = activeWorkspacePath.value?.replace(/\\/g, "/").replace(/\/+$/, "");
+  let decodedPath = filePath;
+  try {
+    decodedPath = decodeURIComponent(filePath);
+  } catch {
+    // Keep malformed percent sequences unchanged so the server can reject them.
+  }
+  const normalizedPath = decodedPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!normalizedPath || !(normalizedPath.startsWith("/") || /^[a-zA-Z]:\//.test(normalizedPath))) return null;
+  if (!workspace) return normalizedPath;
+  const ignoreCase = /^[a-zA-Z]:\//.test(workspace);
+  const comparableWorkspace = ignoreCase ? workspace.toLowerCase() : workspace;
+  const comparablePath = ignoreCase ? normalizedPath.toLowerCase() : normalizedPath;
+  if (!comparablePath.startsWith(`${comparableWorkspace}/`)) return normalizedPath;
+  return normalizedPath.slice(workspace.length + 1);
+}
+
+function handleWorkspaceFilePreviewRequest(event: Event) {
+  const customEvent = event as CustomEvent<{ path?: string; fileName?: string }>;
+  const sessionId = activePreviewSessionId.value;
+  const filePath = typeof customEvent.detail?.path === "string" ? customEvent.detail.path : "";
+  const previewPath = workspacePreviewPath(filePath);
+  if (!sessionId || !previewPath) return;
+
+  customEvent.preventDefault();
+  const fileName = customEvent.detail?.fileName || previewPath.split("/").pop() || previewPath;
+  filesStore.closePreview();
+  toolPanelStore.closeWorkspaceDiff();
+  selectedSubagent.value = null;
+  void filesStore.openSessionWorkspacePreview(sessionId, previewPath, fileName).catch((error) => {
+    message.error(error instanceof Error ? error.message : t("files.previewFailed"));
+  });
+}
+
+function handleOpenSubagentStreamRequest(event: Event) {
+  const customEvent = event as CustomEvent<OpenSubagentStreamDetail>;
+  const detail = customEvent.detail;
+  if (!detail?.sessionId || !detail.subagentId || detail.sessionId !== chatStore.activeSessionId) return;
+  if (toolPanelStore.workspaceDiff && filesStore.hasUnsavedChanges) {
+    message.warning(t("files.unsavedChanges"));
+    return;
+  }
+  if (toolPanelStore.workspaceDiff && filesStore.editingFile) filesStore.closeEditor();
+  filesStore.closePreview();
+  toolPanelStore.closeWorkspaceDiff();
+  selectedSubagent.value = detail;
+  showToolPanel.value = true;
+}
+
 onMounted(() => {
   mobileQuery = window.matchMedia("(max-width: 768px)");
   handleMobileChange(mobileQuery);
   mobileQuery.addEventListener("change", handleMobileChange);
   window.addEventListener("hermes:open-page-sidebar", openPageSidebar);
+  window.addEventListener("hermes:preview-workspace-file", handleWorkspaceFilePreviewRequest);
+  window.addEventListener(OPEN_SUBAGENT_STREAM_EVENT, handleOpenSubagentStreamRequest);
   window.addEventListener("resize", handleToolPanelViewportResize);
   handleToolPanelViewportResize();
   if (profilesStore.profiles.length === 0) {
     void profilesStore.fetchProfiles();
   }
+  void loadSessionCategories();
 });
 
 watch(
   () => chatStore.activeSessionId,
   async (sessionId, previousSessionId) => {
     if (!sessionId || !previousSessionId || sessionId === previousSessionId) return;
+
+    if (filesStore.previewFile || toolPanelStore.workspaceDiff || selectedSubagent.value) {
+      closeToolPanelOverlay();
+    }
 
     await nextTick();
     const surface = chatMainContentRef.value;
@@ -278,9 +383,13 @@ watch(
 onUnmounted(() => {
   mobileQuery?.removeEventListener("change", handleMobileChange);
   window.removeEventListener("hermes:open-page-sidebar", openPageSidebar);
+  window.removeEventListener("hermes:preview-workspace-file", handleWorkspaceFilePreviewRequest);
+  window.removeEventListener(OPEN_SUBAGENT_STREAM_EVENT, handleOpenSubagentStreamRequest);
   window.removeEventListener("resize", handleToolPanelViewportResize);
   stopToolResize();
   sessionFadeAnimation?.cancel();
+  if (filesStore.previewFile?.workspaceSessionId) filesStore.closePreview();
+  toolPanelStore.closeWorkspaceDiff();
   sessionFadeAnimation = null;
 });
 watch(showToolPanel, async (visible) => {
@@ -289,11 +398,62 @@ watch(showToolPanel, async (visible) => {
   handleToolPanelViewportResize();
 });
 
+watch(
+  () => toolPanelStore.workspaceDiff,
+  (workspaceDiff) => {
+    if (workspaceDiff) {
+      selectedSubagent.value = null;
+      showToolPanel.value = true;
+    }
+  },
+);
+
+watch(
+  () => filesStore.previewFile,
+  (previewFile) => {
+    if (previewFile) {
+      selectedSubagent.value = null;
+      showToolPanel.value = true;
+    }
+  },
+);
+
 const showRenameModal = ref(false);
 const renameValue = ref("");
 const renameSessionId = ref<string | null>(null);
 const renameInputRef = ref<InstanceType<typeof NInput> | null>(null);
 const sessionProfileFilter = computed(() => chatStore.sessionProfileFilter);
+const sessionCategories = ref<SessionCategory[]>([]);
+const sessionCategoriesLoading = ref(false);
+const sessionCategoriesLoaded = ref(false);
+let sessionCategoriesLoadPromise: Promise<void> | null = null;
+const COLLAPSED_CATEGORIES_STORAGE_KEY = "hermes_chat_collapsed_categories";
+
+function loadCollapsedCategories(): Set<string> {
+  try {
+    const value = JSON.parse(localStorage.getItem(COLLAPSED_CATEGORIES_STORAGE_KEY) || "[]");
+    return new Set(Array.isArray(value) ? value.map(String) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+const collapsedCategories = ref<Set<string>>(loadCollapsedCategories());
+
+function persistCollapsedCategories() {
+  localStorage.setItem(
+    COLLAPSED_CATEGORIES_STORAGE_KEY,
+    JSON.stringify([...collapsedCategories.value]),
+  );
+}
+
+function toggleCategoryGroup(key: string) {
+  const next = new Set(collapsedCategories.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  collapsedCategories.value = next;
+  persistCollapsedCategories();
+}
 const profileFilterOptions = computed(() => [
   { label: t("chat.allProfiles"), value: "__all__" },
   ...profilesStore.profiles.map((profile) => ({
@@ -303,7 +463,7 @@ const profileFilterOptions = computed(() => [
 ]);
 
 async function handleProfileFilterChange(value: string) {
-  chatStore.sessionProfileFilter = value === "__all__" ? null : value;
+  chatStore.setSessionProfileFilter(value === "__all__" ? null : value);
   await chatStore.loadSessions(chatStore.sessionProfileFilter);
 }
 
@@ -331,6 +491,59 @@ const unpinnedSessions = computed(() =>
     ),
   ),
 );
+
+const categorizedSessions = computed(() => buildVisibleSessionCategoryGroups(
+  sessionCategories.value,
+  unpinnedSessions.value,
+  t("chat.uncategorized"),
+));
+
+watch(
+  () => [
+    sessionCategoriesLoaded.value,
+    categorizedSessions.value.map((group) => group.key).join("\u0000"),
+    chatStore.activeSessionId,
+  ],
+  () => {
+    if (!sessionCategoriesLoaded.value || categorizedSessions.value.length === 0) return;
+    const activeSession = chatStore.sessions.find((session) => session.id === chatStore.activeSessionId);
+    const activeKey = activeSession?.categoryId == null
+      ? "category-none"
+      : `category-${activeSession.categoryId}`;
+    if (collapsedCategories.value.has(activeKey)) {
+      collapsedCategories.value = new Set(
+        [...collapsedCategories.value].filter((key) => key !== activeKey),
+      );
+      persistCollapsedCategories();
+    }
+    if (localStorage.getItem(COLLAPSED_CATEGORIES_STORAGE_KEY) !== null) return;
+    const expandedKey = categorizedSessions.value.some((group) => group.key === activeKey)
+      ? activeKey
+      : categorizedSessions.value[0]?.key;
+    collapsedCategories.value = new Set(
+      categorizedSessions.value.map((group) => group.key).filter((key) => key !== expandedKey),
+    );
+    persistCollapsedCategories();
+  },
+  { immediate: true },
+);
+
+async function loadSessionCategories() {
+  if (sessionCategoriesLoadPromise) return sessionCategoriesLoadPromise;
+  sessionCategoriesLoading.value = true;
+  sessionCategoriesLoadPromise = (async () => {
+    try {
+      sessionCategories.value = await fetchSessionCategories();
+    } catch {
+      message.error(t("chat.categoryLoadFailed"));
+    } finally {
+      sessionCategoriesLoaded.value = true;
+      sessionCategoriesLoading.value = false;
+      sessionCategoriesLoadPromise = null;
+    }
+  })();
+  return sessionCategoriesLoadPromise;
+}
 
 watch(
   () => [
@@ -373,7 +586,54 @@ const newChatBaseUrl = ref<string>("");
 const newChatApiKey = ref<string>("");
 const newChatApiMode = ref<CodingAgentApiMode>("codex_responses");
 const newChatWorkspace = ref("");
+const newChatCategoryId = ref<number | null>(null);
+const newChatCategoryCreating = ref(false);
 const newChatLoading = ref(false);
+
+const newChatCategoryOptions = computed(() => [
+  { label: t("chat.uncategorized"), value: 0 },
+  ...sessionCategories.value.map((category) => ({
+    label: category.name,
+    value: category.id,
+  })),
+]);
+
+async function handleNewChatCategoryChange(value: string | number | null) {
+  if (value === null || value === 0) {
+    newChatCategoryId.value = null;
+    return;
+  }
+  if (typeof value === "number") {
+    newChatCategoryId.value = value;
+    return;
+  }
+
+  const name = value.trim().replace(/\s+/g, " ");
+  if (!name) return;
+  const existing = sessionCategories.value.find(
+    (category) => category.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
+  );
+  if (existing) {
+    newChatCategoryId.value = existing.id;
+    return;
+  }
+
+  newChatCategoryCreating.value = true;
+  try {
+    const category = await createSessionCategory(name);
+    if (!sessionCategories.value.some((item) => item.id === category.id)) {
+      sessionCategories.value = [...sessionCategories.value, category].sort((a, b) =>
+        a.name.localeCompare(b.name),
+      );
+    }
+    newChatCategoryId.value = category.id;
+    message.success(t("chat.categoryCreated", { name: category.name }));
+  } catch (error: any) {
+    message.error(error?.message || t("chat.categoryCreateFailed"));
+  } finally {
+    newChatCategoryCreating.value = false;
+  }
+}
 
 // Default workspace feature (multiple defaults supported)
 const defaultWorkspaces = ref<string[]>([]);
@@ -607,6 +867,7 @@ const newChatNeedsApiKey = computed(() =>
   !selectedNewChatProviderGroup.value?.api_key,
 );
 const canConfirmNewChat = computed(() => {
+  if (newChatCategoryCreating.value) return false;
   if (!newChatProfile.value) return false;
   if (!newChatUsesProviderModel.value) return true;
   if (!newChatProvider.value || !newChatModel.value) return false;
@@ -695,7 +956,9 @@ async function openNewChatModal() {
   showBatchDeleteConfirm.value = false;
   showNewChatModal.value = true;
   newChatLoading.value = true;
+  newChatCategoryId.value = null;
   try {
+    await loadSessionCategories();
     if (profilesStore.profiles.length === 0) await profilesStore.fetchProfiles();
     if (appStore.modelGroups.length === 0 && appStore.profileModelGroups.length === 0) {
       await appStore.loadModels();
@@ -777,6 +1040,7 @@ async function confirmNewChat() {
     codingAgentId: newChatAgent.value === "hermes" ? undefined : newChatAgent.value,
     codingAgentMode: source === "coding_agent" ? codingAgentMode : undefined,
     workspace: newChatWorkspace.value || null,
+    categoryId: newChatCategoryId.value,
     baseUrl: source === "coding_agent" && !isGlobalCodingAgent ? group?.base_url || newChatBaseUrl.value.trim() || undefined : undefined,
     apiKey: source === "coding_agent" && !isGlobalCodingAgent ? group?.api_key || newChatApiKey.value.trim() || undefined : undefined,
     apiMode: isNewChatExternalCodingAgent.value && !isGlobalCodingAgent ? newChatApiMode.value : undefined,
@@ -938,6 +1202,87 @@ const contextSession = computed(() =>
     : null,
 );
 
+const showCategoryContextMenu = ref(false);
+const categoryContextMenuX = ref(0);
+const categoryContextMenuY = ref(0);
+const categoryContextId = ref<number | null>(null);
+const categoryContextName = computed(() =>
+  sessionCategories.value.find((item) => item.id === categoryContextId.value)?.name || "",
+);
+const categoryContextMenuOptions = computed<DropdownOption[]>(() => [
+  { label: t("chat.renameCategory"), key: "rename" },
+  { label: t("chat.deleteCategory"), key: "delete" },
+]);
+const showRenameCategoryModal = ref(false);
+const renameCategoryValue = ref("");
+const showDeleteCategoryModal = ref(false);
+
+function handleCategoryContextMenu(event: MouseEvent, groupKey: string) {
+  if (groupKey === "category-none") return;
+  const categoryId = Number(groupKey.slice("category-".length));
+  if (!Number.isSafeInteger(categoryId)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  showContextMenu.value = false;
+  categoryContextId.value = categoryId;
+  categoryContextMenuX.value = event.clientX;
+  categoryContextMenuY.value = event.clientY;
+  showCategoryContextMenu.value = true;
+}
+
+function handleCategoryContextMenuSelect(key: string) {
+  showCategoryContextMenu.value = false;
+  const category = sessionCategories.value.find((item) => item.id === categoryContextId.value);
+  if (!category) return;
+  if (key === "rename") {
+    renameCategoryValue.value = category.name;
+    showRenameCategoryModal.value = true;
+  } else if (key === "delete") {
+    showDeleteCategoryModal.value = true;
+  }
+}
+
+async function handleRenameCategoryConfirm() {
+  const categoryId = categoryContextId.value;
+  const name = renameCategoryValue.value.trim().replace(/\s+/g, " ");
+  if (!categoryId || !name) return false;
+  try {
+    const category = await renameSessionCategory(categoryId, name);
+    sessionCategories.value = sessionCategories.value
+      .map((item) => item.id === category.id ? category : item)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    message.success(t("chat.categoryRenamed"));
+    showRenameCategoryModal.value = false;
+  } catch (error: any) {
+    message.error(error?.message || t("chat.categoryRenameFailed"));
+    return false;
+  }
+}
+
+async function handleDeleteCategoryConfirm() {
+  const categoryId = categoryContextId.value;
+  if (!categoryId) return false;
+  try {
+    await deleteSessionCategory(categoryId);
+    sessionCategories.value = sessionCategories.value.filter((item) => item.id !== categoryId);
+    for (const session of chatStore.sessions) {
+      if (session.categoryId === categoryId) session.categoryId = null;
+    }
+    const collapsedKey = `category-${categoryId}`;
+    if (collapsedCategories.value.has(collapsedKey)) {
+      collapsedCategories.value = new Set(
+        [...collapsedCategories.value].filter((key) => key !== collapsedKey),
+      );
+      persistCollapsedCategories();
+    }
+    message.success(t("chat.categoryDeleted"));
+    showDeleteCategoryModal.value = false;
+  } catch (error: any) {
+    message.error(error?.message || t("chat.categoryDeleteFailed"));
+    return false;
+  }
+}
+
 const contextMenuOptions = computed(() => {
   const options: DropdownOption[] = [{
     label: t(contextSessionPinned.value ? "chat.unpin" : "chat.pin"),
@@ -954,6 +1299,18 @@ const contextMenuOptions = computed(() => {
   if (contextSession.value?.source === "cli" || contextSession.value?.source === "coding_agent") {
     options.push({ label: t("chat.setModel"), key: "model" })
   }
+
+  options.push({
+    label: t("chat.moveToCategory"),
+    key: "category",
+    children: [
+      { label: t("chat.uncategorized"), key: "category:none" },
+      ...sessionCategories.value.map((category) => ({
+        label: category.name,
+        key: `category:${category.id}`,
+      })),
+    ],
+  })
 
   options.push({
     label: t("chat.export"),
@@ -989,6 +1346,7 @@ function openSettingsPage() {
 
 function handleContextMenu(e: MouseEvent, sessionId: string) {
   e.preventDefault();
+  showCategoryContextMenu.value = false;
   contextSessionId.value = sessionId;
   showContextMenu.value = true;
   contextMenuX.value = e.clientX;
@@ -1012,6 +1370,22 @@ async function handleContextMenuSelect(key: string) {
   if (!contextSessionId.value) return;
   if (key === "pin") {
     sessionBrowserPrefsStore.togglePinned(contextSessionId.value);
+    return;
+  }
+  if (key.startsWith("category:")) {
+    const session = contextSession.value;
+    if (!session) return;
+    const rawCategoryId = key.slice("category:".length);
+    const categoryId = rawCategoryId === "none" ? null : Number(rawCategoryId);
+    if (categoryId !== null && !Number.isSafeInteger(categoryId)) return;
+    try {
+      if (!session.isLocalOnly) await setSessionCategory(session.id, categoryId);
+    } catch (error: any) {
+      message.error(error?.message || t("chat.categoryUpdateFailed"));
+      return;
+    }
+    session.categoryId = categoryId;
+    message.success(t("chat.categoryUpdated"));
     return;
   }
   if (key === "copy-link") {
@@ -1545,27 +1919,51 @@ async function handleSessionModelCustomSubmit() {
           />
         </template>
 
-        <SessionListItem
-          v-for="s in unpinnedSessions"
-          :key="s.id"
-          :session="s"
-          :active="s.id === chatStore.activeSessionId"
-          :pinned="false"
-          :can-delete="
-            s.id !== chatStore.activeSessionId ||
-            chatStore.sessions.length > 1
-          "
-          :streaming="chatStore.isSessionLive(s.id)"
-          :completed-unread="chatStore.isSessionCompletedUnread(s.id)"
-          :selectable="isBatchMode"
-          :selected="isSessionSelected(s)"
-          :show-profile="true"
-          :to="sessionHref(s.id)"
-          @select="handleSessionClick(s.id)"
-          @contextmenu="handleContextMenu($event, s.id)"
-          @delete="handleDeleteSession(s.id)"
-          @toggle-select="toggleSessionSelection(s)"
-        />
+        <template v-for="group in categorizedSessions" :key="group.key">
+          <div
+            class="session-group-header"
+            @click="toggleCategoryGroup(group.key)"
+            @contextmenu="handleCategoryContextMenu($event, group.key)"
+          >
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              class="group-chevron"
+              :class="{ collapsed: collapsedCategories.has(group.key) }"
+            >
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+            <span class="session-group-label">{{ group.label }}</span>
+            <span class="session-group-count">{{ group.sessions.length }}</span>
+          </div>
+          <template v-if="!collapsedCategories.has(group.key)">
+            <SessionListItem
+              v-for="s in group.sessions"
+              :key="s.id"
+              :session="s"
+              :active="s.id === chatStore.activeSessionId"
+              :pinned="false"
+              :can-delete="
+                s.id !== chatStore.activeSessionId ||
+                chatStore.sessions.length > 1
+              "
+              :streaming="chatStore.isSessionLive(s.id)"
+              :completed-unread="chatStore.isSessionCompletedUnread(s.id)"
+              :selectable="isBatchMode"
+              :selected="isSessionSelected(s)"
+              :show-profile="true"
+              :to="sessionHref(s.id)"
+              @select="handleSessionClick(s.id)"
+              @contextmenu="handleContextMenu($event, s.id)"
+              @delete="handleDeleteSession(s.id)"
+              @toggle-select="toggleSessionSelection(s)"
+            />
+          </template>
+        </template>
       </div>
       <div v-if="showSessions" class="page-sidebar-bottom">
         <button class="page-sidebar-menu-btn" type="button" @click="openSettingsPage">
@@ -1598,6 +1996,45 @@ async function handleSessionModelCustomSubmit() {
       @select="handleContextMenuSelect"
       @clickoutside="handleClickOutside"
     />
+
+    <NDropdown
+      placement="bottom-start"
+      trigger="manual"
+      :x="categoryContextMenuX"
+      :y="categoryContextMenuY"
+      :options="categoryContextMenuOptions"
+      :show="showCategoryContextMenu"
+      @select="handleCategoryContextMenuSelect"
+      @clickoutside="showCategoryContextMenu = false"
+    />
+
+    <NModal
+      v-model:show="showRenameCategoryModal"
+      preset="dialog"
+      :title="t('chat.renameCategory')"
+      :positive-text="t('common.ok')"
+      :negative-text="t('common.cancel')"
+      @positive-click="handleRenameCategoryConfirm"
+    >
+      <NInput
+        v-model:value="renameCategoryValue"
+        :placeholder="t('chat.enterCategoryName')"
+        :maxlength="40"
+        @keydown.enter="handleRenameCategoryConfirm"
+      />
+    </NModal>
+
+    <NModal
+      v-model:show="showDeleteCategoryModal"
+      preset="dialog"
+      type="warning"
+      :title="t('chat.deleteCategory')"
+      :positive-text="t('common.delete')"
+      :negative-text="t('common.cancel')"
+      @positive-click="handleDeleteCategoryConfirm"
+    >
+      {{ t('chat.confirmDeleteCategory', { name: categoryContextName }) }}
+    </NModal>
 
     <NModal
       v-model:show="showRenameModal"
@@ -1844,6 +2281,20 @@ async function handleSessionModelCustomSubmit() {
               @update:value="handleNewChatProfileChange"
             />
           </label>
+          <label class="new-chat-field">
+            <span class="new-chat-label">{{ t("chat.category") }}</span>
+            <NSelect
+              :value="newChatCategoryId ?? 0"
+              :options="newChatCategoryOptions"
+              :placeholder="t('chat.categoryPlaceholder')"
+              :loading="sessionCategoriesLoading || newChatCategoryCreating"
+              :disabled="newChatLoading || newChatCategoryCreating"
+              filterable
+              tag
+              @update:value="handleNewChatCategoryChange"
+            />
+            <span class="new-chat-field-hint">{{ t("chat.categoryCreateHint") }}</span>
+          </label>
           <label v-if="newChatUsesProviderModel && newChatCanUseMoa" class="new-chat-field">
             <span class="new-chat-label">{{ t('chat.modelType') }}</span>
             <NRadioGroup
@@ -2054,7 +2505,7 @@ async function handleSessionModelCustomSubmit() {
                   :class="{ active: showToolPanel }"
                   quaternary
                   size="small"
-                  @click="showToolPanel = !showToolPanel"
+                  @click="toggleToolPanel"
                   circle
                 >
                   <template #icon>
@@ -2167,39 +2618,54 @@ async function handleSessionModelCustomSubmit() {
               @pointerdown="startToolResize"
             />
             <div class="chat-tool-panel-inner">
-              <div class="chat-tool-tabs" role="tablist">
-                <button
-                  class="chat-tool-tab"
-                  :class="{ active: activeToolPanel === 'files' }"
-                  type="button"
-                  role="tab"
-                  :aria-selected="activeToolPanel === 'files'"
-                  @click="activeToolPanel = 'files'"
-                >
-                  {{ t("drawer.files") }}
-                </button>
-                <button
-                  class="chat-tool-tab"
-                  :class="{ active: activeToolPanel === 'terminal' }"
-                  type="button"
-                  role="tab"
-                  :aria-selected="activeToolPanel === 'terminal'"
-                  @click="activeToolPanel = 'terminal'"
-                >
-                  {{ t("drawer.terminal") }}
-                </button>
-              </div>
-              <div class="chat-tool-content">
-                <FilesPanel
-                  v-show="activeToolPanel === 'files'"
-                  :workspace-session-id="activeWorkspaceSessionId"
-                  :workspace="activeWorkspacePath"
-                />
-                <TerminalPanel
-                  v-show="activeToolPanel === 'terminal'"
-                  :visible="showToolPanel && activeToolPanel === 'terminal'"
-                />
-              </div>
+              <WorkspaceDiffPreview
+                v-if="toolPanelStore.workspaceDiff"
+                :custom-close="closeToolPanelOverlay"
+              />
+              <FilePreview
+                v-else-if="filesStore.previewFile"
+                :custom-close="closeToolPanelOverlay"
+              />
+              <SubagentStreamPanel
+                v-else-if="selectedSubagent"
+                :stream="selectedSubagentStream"
+                @close="closeToolPanelOverlay"
+              />
+              <template v-else>
+                <div class="chat-tool-tabs" role="tablist">
+                  <button
+                    class="chat-tool-tab"
+                    :class="{ active: activeToolPanel === 'files' }"
+                    type="button"
+                    role="tab"
+                    :aria-selected="activeToolPanel === 'files'"
+                    @click="activeToolPanel = 'files'"
+                  >
+                    {{ t("drawer.files") }}
+                  </button>
+                  <button
+                    class="chat-tool-tab"
+                    :class="{ active: activeToolPanel === 'terminal' }"
+                    type="button"
+                    role="tab"
+                    :aria-selected="activeToolPanel === 'terminal'"
+                    @click="activeToolPanel = 'terminal'"
+                  >
+                    {{ t("drawer.terminal") }}
+                  </button>
+                </div>
+                <div class="chat-tool-content">
+                  <FilesPanel
+                    v-show="activeToolPanel === 'files'"
+                    :workspace-session-id="activeWorkspaceSessionId"
+                    :workspace="activeWorkspacePath"
+                  />
+                  <TerminalPanel
+                    v-show="activeToolPanel === 'terminal'"
+                    :visible="showToolPanel && activeToolPanel === 'terminal'"
+                  />
+                </div>
+              </template>
             </div>
           </aside>
         </div>
@@ -2701,6 +3167,11 @@ async function handleSessionModelCustomSubmit() {
   font-size: 12px;
   color: $text-muted;
   font-weight: 500;
+}
+
+.new-chat-field-hint {
+  font-size: 11px;
+  color: $text-muted;
 }
 
 .new-chat-actions {
