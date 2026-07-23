@@ -836,6 +836,7 @@ export default {
     title: '工作流',
     profile: '配置',
     namePlaceholder: '工作流名称',
+    canvasAriaLabel: '工作流画布',
     workspace: {
       title: '选择工作区',
       select: '选择工作区',
@@ -866,6 +867,15 @@ export default {
       exported: 'Workflow 导出成功',
       importFailed: 'Workflow 导入失败',
       exportFailed: 'Workflow 导出失败',
+    },
+    budget: {
+      runTitle: '选择 Run 时间预算', rerunTitle: '选择 Rerun 时间预算', totalLabel: '整条 Run 总预算',
+      customMinutes: '自定义分钟数', customPlaceholder: '分钟', invalidCustom: '自定义 Run 预算必须介于 0.1 到 1440 分钟',
+      help: '这是整条 Run 共用的绝对截止时间。每个节点只获得当时的剩余时间，循环不会重置预算。',
+      options: { unlimited: '不设截止时间', '30': '30 分钟', '60': '60 分钟', '90': '90 分钟', custom: '自定义' },
+      unlimitedSummary: '不设截止时间', unlimitedHelp: '本次 Run 没有配置时间截止点。',
+      summary: '总预算 {total} · 已用 {elapsed} · 剩余 {remaining}', deadline: '截止时间：{deadline}',
+      nodeStartRemaining: '节点启动时剩余 {remaining}',
     },
     evidence: {
       ariaLabel: 'Workflow 执行详情', title: '执行详情', count: '{count} 条',
@@ -1013,6 +1023,7 @@ export default {
       refresh: '刷新',
       empty: '暂无执行记录',
       startNodes: '{count} 个起始节点',
+      snapshotIndicator: '本次运行启动时的冻结快照',
       show: '显示执行记录',
       hide: '隐藏执行记录',
       nodeSessionTitle: '节点会话 - {node}',
@@ -2655,6 +2666,8 @@ export default {
     preview: '预览',
     download: '下载',
     copyPath: '复制路径',
+    attachToChat: '添加到输入框',
+    attachFailed: '添加文件失败',
     rename: '重命名',
     delete: '删除',
     name: '名称',
@@ -2721,6 +2734,16 @@ export default {
 
   // 更新日志
   changelog: {
+    new_0_6_32_1: '本版本涵盖 0.6.31 之后合并的全部 14 个 PR，聚焦会话分类与压缩、群聊、Workflow 路由、Skill Bundle、Ekko 记忆、Hermes 0.19 和桌面窗口界面',
+    new_0_6_32_2: "群聊 {'@'}mention 现在可在 CJK 文本、Emoji 和标点后正常触发；房主也可在房间设置中查看、生成和轮换邀请码（#2133、#2141）",
+    new_0_6_32_3: 'Workflow 在 handoff 和重新连接过程中会保留每次 Hermes Bridge 运行的来源；Scoped Codex 和 Claude Code 节点也可为有效 API Key 目标使用 launcher 支持的协议（#2137、#2154）',
+    new_0_6_32_4: '会话新增全局分类、更准确的 Markdown 感知搜索排序，以及在编辑、分支和并发运行中保持正确并限制历史范围的游标压缩；完整压缩方案也已形成文档（#2139、#2143、#2145、#2146）',
+    new_0_6_32_5: '现在可直接在聊天中创建、浏览、运行和删除 Profile 级 Skill Bundle，并清楚查看其中包含的 Skill（#2156）',
+    new_0_6_32_6: 'Ekko 记忆改用 Profile 隔离的单一规范模型，支持 revision 校验的精确修改、更完整的来源审计和更严格的相关性过滤（#2159）',
+    new_0_6_32_7: 'Hermes 0.19 的助手中间消息会以独立气泡实时显示并保存；普通单聊也可异步投递持久化的后台委派结果（#2160）',
+    new_0_6_32_8: '新的桌面 Runtime 构建、后备路径和 Windows CLI shim 现在默认使用 Hermes Agent 0.19.0（#2161）',
+    new_0_6_32_9: '桌面窗口控件已融入页面框架：macOS 红绿灯位于侧边栏，Windows 控件位于主内容上方，Linux 继续使用原生窗口装饰（#2162）',
+    new_0_6_32_10: '开发文档现在同时支持直接使用当前 checkout，并可按需采用隔离的 Git worktree（#2155）',
     new_0_6_31_1: '本版本涵盖 0.6.30 之后合并的全部 25 个 PR，聚焦 Workflow 路由与回放、生成文件预览、Provider 编辑、聊天增强，以及桌面更新和视觉完善',
     new_0_6_31_2: 'Workflow 新增结构化 JSON 条件、更清晰的阻塞路径证据、完整执行记录弹窗，并可按真实历史路径回放执行过程（#2088、#2093、#2099、#2128）',
     new_0_6_31_3: '现在可在 Profile 文件、会话 workspace 和受管群聊 workspace 中安全预览生成的 HTML、PDF、DOCX、PPTX、XLSX、CSV、图片、Markdown 和源码文件（#2110、#2113）',

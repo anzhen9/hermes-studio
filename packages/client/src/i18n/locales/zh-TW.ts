@@ -823,6 +823,7 @@ export default {
     title: '工作流',
     profile: '設定檔',
     namePlaceholder: '工作流名稱',
+    canvasAriaLabel: '工作流畫布',
     workspace: {
       title: '選擇工作區',
       select: '選擇工作區',
@@ -869,6 +870,15 @@ export default {
       routes: { success: '成功後繼續', failure: '失敗後進入處理', always: '無論成功或失敗均繼續' },
       reasons: { evaluationFailed: '路徑判斷失敗', conditionNotMatched: '條件不符合', iterationLimitReached: '已達最大循環輪次', routeNotMatched: '目前結果不符合此路徑', pathSelected: '本次已採用此路徑。', sourceSkipped: '上游節點未執行，因此本次不經過此路徑。', failureRouteAfterSuccess: '上游節點已正常回傳；此路徑只在節點執行失敗時採用。', successRouteAfterFailure: '上游節點執行失敗；此路徑只在節點正常回傳時採用。', businessBlocked: '「{source}」已阻止繼續執行（{decision}）：{reason}。因此沒有執行「{target}」。', businessBlockedWithCondition: '「{source}」已阻止繼續執行（{decision}）：{reason}。繼續執行需要「{expected}」，但上游實際結果是「{actual}」，因此沒有執行「{target}」。', conditionMismatchDetail: '繼續執行需要「{expected}」，但上游實際結果是「{actual}」，因此沒有執行「{target}」。' },
       loopOutcomes: { continued: '條件符合，繼續下一輪', iterationLimitReached: '達到最大輪次後停止', conditionNotMatched: '條件不符合，循環結束', finished: '循環已結束' },
+    },
+    budget: {
+      runTitle: '選擇 Run 時間預算', rerunTitle: '選擇 Rerun 時間預算', totalLabel: '整個 Run 總預算',
+      customMinutes: '自訂分鐘數', customPlaceholder: '分鐘', invalidCustom: '自訂 Run 預算必須介於 0.1 到 1440 分鐘',
+      help: '這是整個 Run 共用的絕對截止時間。每個節點只取得當時的剩餘時間，循環不會重設預算。',
+      options: { unlimited: '不設截止時間', '30': '30 分鐘', '60': '60 分鐘', '90': '90 分鐘', custom: '自訂' },
+      unlimitedSummary: '不設截止時間', unlimitedHelp: '本次 Run 未設定截止時間。',
+      summary: '總計 {total} · 已用 {elapsed} · 剩餘 {remaining}', deadline: '截止時間：{deadline}',
+      nodeStartRemaining: '節點啟動時剩餘總預算：{remaining}',
     },
     edgeEditor: {
       title: '編輯連接線', guideIntro: '連接線只有在「路由」符合，而且可選的「條件」也符合時才會生效。不需要檢查內容時，選擇「只判斷路由」。',
@@ -995,6 +1005,7 @@ export default {
       refresh: '重新整理',
       empty: '暫無執行記錄',
       startNodes: '{count} 個起始節點',
+      snapshotIndicator: '本次執行啟動時的凍結快照',
       show: '顯示執行記錄',
       hide: '隱藏執行記錄',
       nodeSessionTitle: '節點會話 - {node}',
@@ -2606,6 +2617,8 @@ export default {
     preview: '預覽',
     download: '下載',
     copyPath: '複製路徑',
+    attachToChat: '加入輸入框',
+    attachFailed: '加入檔案失敗',
     rename: '重新命名',
     delete: '刪除',
     name: '名稱',
@@ -2673,6 +2686,16 @@ export default {
 
   // 更新日誌
   changelog: {
+    new_0_6_32_1: '本版本涵蓋 0.6.31 之後合併的全部 14 個 PR，聚焦工作階段分類與壓縮、群聊、Workflow 路由、Skill Bundle、Ekko 記憶、Hermes 0.19 和桌面視窗介面',
+    new_0_6_32_2: "群聊 {'@'}mention 現在可在 CJK 文字、Emoji 和標點後正常觸發；房主也可在房間設定中檢視、產生和輪換邀請碼（#2133、#2141）",
+    new_0_6_32_3: 'Workflow 在 handoff 和重新連線過程中會保留每次 Hermes Bridge 執行的來源；Scoped Codex 和 Claude Code 節點也可為有效 API Key 目標使用 launcher 支援的協定（#2137、#2154）',
+    new_0_6_32_4: '工作階段新增全域分類、更準確的 Markdown 感知搜尋排序，以及在編輯、分支和並行執行中保持正確並限制歷史範圍的游標壓縮；完整壓縮方案也已形成文件（#2139、#2143、#2145、#2146）',
+    new_0_6_32_5: '現在可直接在聊天中建立、瀏覽、執行和刪除 Profile 層級 Skill Bundle，並清楚檢視其中包含的 Skill（#2156）',
+    new_0_6_32_6: 'Ekko 記憶改用 Profile 隔離的單一規範模型，支援 revision 校驗的精確修改、更完整的來源稽核和更嚴格的相關性篩選（#2159）',
+    new_0_6_32_7: 'Hermes 0.19 的助手中間訊息會以獨立氣泡即時顯示並儲存；一般單聊也可非同步投遞持久化的背景委派結果（#2160）',
+    new_0_6_32_8: '新的桌面 Runtime 建置、後備路徑和 Windows CLI shim 現在預設使用 Hermes Agent 0.19.0（#2161）',
+    new_0_6_32_9: '桌面視窗控制項已融入頁面框架：macOS 紅綠燈位於側邊欄，Windows 控制項位於主要內容上方，Linux 繼續使用原生視窗裝飾（#2162）',
+    new_0_6_32_10: '開發文件現在同時支援直接使用目前 checkout，並可按需採用隔離的 Git worktree（#2155）',
     new_0_6_31_1: '本版本涵蓋 0.6.30 之後合併的全部 25 個 PR，聚焦 Workflow 路由與回放、產生檔案預覽、Provider 編輯、聊天增強，以及桌面更新和視覺完善',
     new_0_6_31_2: 'Workflow 新增結構化 JSON 條件、更清楚的阻塞路徑證據、完整執行記錄彈窗，並可依真實歷史路徑回放執行過程（#2088、#2093、#2099、#2128）',
     new_0_6_31_3: '現在可在 Profile 檔案、工作階段 workspace 和受管群聊 workspace 中安全預覽產生的 HTML、PDF、DOCX、PPTX、XLSX、CSV、圖片、Markdown 和原始碼檔案（#2110、#2113）',

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NButton, NCheckbox, NDrawer, NDrawerContent, NDropdown, NInput, NModal, NPopconfirm, NSelect, NSpace, NTooltip, useMessage, type DropdownOption } from 'naive-ui'
+import { NButton, NCheckbox, NDrawer, NDrawerContent, NDropdown, NInput, NInputNumber, NModal, NPopconfirm, NSelect, NSpace, NTooltip, useMessage, type DropdownOption } from 'naive-ui'
 import {
   ConnectionMode,
   ConnectionLineType,
@@ -16,6 +16,11 @@ import { MiniMap } from '@vue-flow/minimap'
 import { useI18n } from 'vue-i18n'
 import { buildWorkflowEvidenceRows, latestWorkflowNodeSession, summarizeWorkflowEvidenceRows, workflowEdgePlaybackState, type WorkflowEvidenceRow } from '@/utils/workflow-history'
 import {
+  normalizeWorkflowRunEdge,
+  normalizeWorkflowRunNodeTargets,
+  workflowRunEdgeCanvasLabel,
+} from '@/utils/workflow-run-snapshot'
+import {
   inferWorkflowConditionValueType,
   parseWorkflowConditionValue,
   requiredWorkflowConditionValueType,
@@ -24,6 +29,14 @@ import {
   type WorkflowConditionValueType,
 } from '@/utils/workflow-edge-condition'
 import { workflowImportConfirmationText } from '@/utils/workflow-import'
+import {
+  WORKFLOW_RUN_BUDGET_PRESETS,
+  isWorkflowRunBudgetValid,
+  resolveWorkflowRunTimeoutMs,
+  workflowRunBudgetRequest,
+  workflowRunBudgetSnapshot,
+  type WorkflowRunBudgetChoice,
+} from '@/utils/workflow-run-budget'
 import { createConnectedAgentTransaction, type CanvasTransaction } from '@/utils/workflow-canvas'
 import {
   createWorkflowAuthoringEdge,
@@ -292,6 +305,14 @@ const showWorkflowBatchDeleteConfirm = ref(false)
 const isWorkflowBatchDeleting = ref(false)
 const savingWorkflow = ref(false)
 const executingWorkflow = ref(false)
+const workflowRunBudgetModalVisible = ref(false)
+const workflowRunBudgetChoice = ref<WorkflowRunBudgetChoice>('unlimited')
+const workflowRunBudgetCustomMinutes = ref<number | null>(60)
+const workflowRunBudgetSubmitting = ref(false)
+const pendingWorkflowRunBudgetAction = ref<
+  { kind: 'run' } | { kind: 'rerun'; nodeId: string; preserveStartNode: boolean } | null
+>(null)
+const workflowBudgetNow = ref(Date.now())
 const workflowRuns = ref<WorkflowRunRecord[]>([])
 const workflowRunsLoading = ref(false)
 const rerunningWorkflowNodeId = ref<string | null>(null)
@@ -337,12 +358,21 @@ let applyingWorkflow = false
 let workflowRunsLoadSeq = 0
 let workflowRunsLoadingSeq = 0
 let edgePreviewTimer: number | null = null
+let workflowBudgetClock: number | null = null
 
 const agentOptions = computed<WorkflowSelectOption[]>(() => [
   { label: 'Hermes', value: 'hermes' },
   { label: 'Claude Code', value: 'claude-code' },
   { label: 'Codex', value: 'codex' },
 ])
+const workflowRunBudgetOptions = computed(() => WORKFLOW_RUN_BUDGET_PRESETS.map(option => ({
+  value: option.value,
+  label: t(`workflow.budget.options.${option.value}`),
+})))
+const workflowRunBudgetValid = computed(() => isWorkflowRunBudgetValid(
+  workflowRunBudgetChoice.value,
+  workflowRunBudgetCustomMinutes.value,
+))
 
 const modelGroups = computed<AvailableModelGroup[]>(() => appStore.modelGroups)
 
@@ -611,6 +641,14 @@ const selectedWorkflowRun = computed(() =>
     ? workflowRuns.value.find(run => run.id === selectedWorkflowRunId.value) || null
     : null,
 )
+const selectedWorkflowRunBudgetSessions = computed(() => {
+  const run = selectedWorkflowRun.value
+  if (!run) return []
+  return (run.node_sessions || []).filter(session => (
+    session.remaining_timeout_ms_at_start != null
+    && (run.started_at == null || session.started_at == null || session.started_at >= run.started_at)
+  ))
+})
 const selectedWorkflowEvidenceRows = computed(() => selectedWorkflowRun.value ? buildWorkflowEvidenceRows(selectedWorkflowRun.value) : [])
 const selectedWorkflowEvidenceSummary = computed(() => summarizeWorkflowEvidenceRows(selectedWorkflowEvidenceRows.value))
 
@@ -638,7 +676,14 @@ function workflowEdgeCanvasLabel(edge: WorkflowEdge): string {
 }
 
 function withWorkflowEdgeCanvasLabel(edge: WorkflowEdge): WorkflowEdge {
-  return { ...edge, label: workflowEdgeCanvasLabel(edge) }
+  return {
+    ...edge,
+    label: workflowRunEdgeCanvasLabel(
+      edge.label,
+      workflowEdgeCanvasLabel(edge),
+      Boolean(selectedWorkflowRunId.value),
+    ),
+  }
 }
 
 const renderedEdges = computed<WorkflowEdge[]>({
@@ -712,13 +757,11 @@ const workflowChatPanelPendingApproval = computed(() => {
 })
 
 watch([agentOptions, modelGroups], () => {
-  nodes.value = nodes.value.map<WorkflowNode>(node => ({
-    ...node,
-    data: {
-      ...node.data,
-      ...normalizeNodeModel(node.data),
-    },
-  }))
+  nodes.value = normalizeWorkflowRunNodeTargets(
+    nodes.value,
+    Boolean(selectedWorkflowRunId.value),
+    normalizeNodeModel,
+  )
   refreshWorkflowNodeSkillOptions()
 })
 
@@ -728,6 +771,7 @@ watch([workflowName, workflowWorkspace, nodes, edges, nextNodeIndex], () => {
 
 onMounted(() => {
   if (typeof window === 'undefined') return
+  workflowBudgetClock = window.setInterval(() => { workflowBudgetNow.value = Date.now() }, 1000)
   mobileQuery = window.matchMedia('(max-width: 768px)')
   handleMobileChange(mobileQuery)
   mobileQuery.addEventListener('change', handleMobileChange)
@@ -739,6 +783,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (workflowBudgetClock !== null) window.clearInterval(workflowBudgetClock)
+  workflowBudgetClock = null
   mobileQuery?.removeEventListener('change', handleMobileChange)
   window.removeEventListener('hermes:open-page-sidebar', openPageSidebar)
   window.removeEventListener('resize', handleWorkflowChatPanelViewportResize)
@@ -1057,19 +1103,7 @@ function normalizeStoredNode(raw: unknown, index: number): WorkflowNode {
 }
 
 function normalizeStoredEdge(raw: unknown): WorkflowEdge | null {
-  const record = raw && typeof raw === 'object' ? raw as Record<string, any> : {}
-  if (typeof record.source !== 'string' || typeof record.target !== 'string') return null
-  return {
-    id: typeof record.id === 'string' && record.id ? record.id : `${record.source}-${record.target}`,
-    source: record.source,
-    target: record.target,
-    sourceHandle: normalizeWorkflowHandleId(record.sourceHandle, 'source'),
-    targetHandle: normalizeWorkflowHandleId(record.targetHandle, 'target'),
-    type: workflowEdgeVisualType(record.source, record.target),
-    animated: false,
-    markerEnd: MarkerType.ArrowClosed,
-    data: record.data && typeof record.data === 'object' ? { ...record.data } : undefined,
-  }
+  return normalizeWorkflowRunEdge(raw) as WorkflowEdge | null
 }
 
 function nextIndexFromNodes(source: WorkflowNode[]): number {
@@ -1400,6 +1434,42 @@ function workflowEvidenceRawReason(row: WorkflowEvidenceRow): string {
 function formatWorkflowRunTime(timestamp: number | null): string {
   if (!timestamp) return '-'
   return new Date(timestamp).toLocaleString()
+}
+
+function formatWorkflowBudgetDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remain = seconds % 60
+  if (minutes < 60) return remain ? `${minutes}m ${remain}s` : `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  const minuteRemain = minutes % 60
+  return minuteRemain ? `${hours}h ${minuteRemain}m` : `${hours}h`
+}
+
+function workflowRunBudgetDetails(run: WorkflowRunRecord): string {
+  const budget = workflowRunBudgetSnapshot(run, workflowBudgetNow.value)
+  if (!budget) return t('workflow.budget.unlimitedSummary')
+  if (budget.totalMs == null || budget.remainingMs == null) {
+    return `${t('workflow.budget.unlimitedSummary')} · ${formatWorkflowBudgetDuration(budget.elapsedMs)}`
+  }
+  return t('workflow.budget.summary', {
+    total: formatWorkflowBudgetDuration(budget.totalMs),
+    elapsed: formatWorkflowBudgetDuration(budget.elapsedMs),
+    remaining: formatWorkflowBudgetDuration(budget.remainingMs),
+  })
+}
+
+function workflowRunBudgetTitle(run: WorkflowRunRecord): string {
+  const budget = workflowRunBudgetSnapshot(run, workflowBudgetNow.value)
+  if (!budget || budget.deadlineAt == null) return t('workflow.budget.unlimitedHelp')
+  return t('workflow.budget.deadline', { deadline: formatWorkflowRunTime(budget.deadlineAt) })
+}
+
+function workflowNodeStartBudgetLabel(remainingMs: number | null | undefined): string {
+  return t('workflow.budget.nodeStartRemaining', {
+    remaining: formatWorkflowBudgetDuration(remainingMs || 0),
+  })
 }
 
 function formatWorkflowRunDuration(run: WorkflowRunRecord): string {
@@ -2118,17 +2188,56 @@ async function saveActiveWorkflow(options: { quiet?: boolean } = {}): Promise<bo
   }
 }
 
-async function startWorkflowExecution() {
+function startWorkflowExecution() {
   if (!activeWorkflowId.value || executingWorkflow.value || selectedWorkflowRunId.value) return
+  pendingWorkflowRunBudgetAction.value = { kind: 'run' }
+  workflowRunBudgetModalVisible.value = true
+}
+
+function closeWorkflowRunBudgetModal(force = false) {
+  if (workflowRunBudgetSubmitting.value && !force) return
+  workflowRunBudgetModalVisible.value = false
+  pendingWorkflowRunBudgetAction.value = null
+}
+
+function handleWorkflowRunBudgetVisibility(visible: boolean) {
+  if (!visible && workflowRunBudgetSubmitting.value) return
+  workflowRunBudgetModalVisible.value = visible
+  if (!visible) pendingWorkflowRunBudgetAction.value = null
+}
+
+async function confirmWorkflowRunBudget() {
+  const action = pendingWorkflowRunBudgetAction.value
+  if (!action || !workflowRunBudgetValid.value || workflowRunBudgetSubmitting.value) return
+  let timeoutMs: number | undefined
+  try {
+    timeoutMs = resolveWorkflowRunTimeoutMs(workflowRunBudgetChoice.value, workflowRunBudgetCustomMinutes.value)
+  } catch {
+    message.error(t('workflow.budget.invalidCustom'))
+    return
+  }
+  workflowRunBudgetSubmitting.value = true
+  try {
+    const accepted = action.kind === 'run'
+      ? await executeWorkflowWithBudget(timeoutMs)
+      : await rerunWorkflowFromNode(action.nodeId, action.preserveStartNode, timeoutMs)
+    if (accepted) closeWorkflowRunBudgetModal(true)
+  } finally {
+    workflowRunBudgetSubmitting.value = false
+  }
+}
+
+async function executeWorkflowWithBudget(timeoutMs: number | undefined): Promise<boolean> {
+  if (!activeWorkflowId.value || executingWorkflow.value || selectedWorkflowRunId.value) return false
   const workflowId = activeWorkflowId.value
   const saved = await saveActiveWorkflow({ quiet: true })
-  if (!saved) return
+  if (!saved) return false
   showWorkflowRunsPanel.value = true
   manuallyDeselectedWorkflowRunIds.value = new Set()
   autoSelectRunningWorkflowIds.value = new Set([...autoSelectRunningWorkflowIds.value, workflowId])
   executingWorkflow.value = true
   try {
-    await runWorkflowNow(workflowId)
+    await runWorkflowNow(workflowId, workflowRunBudgetRequest(timeoutMs))
     void loadWorkflowRuns(workflowId)
     const now = Date.now()
     handleWorkflowRuntimeStatus({
@@ -2142,17 +2251,19 @@ async function startWorkflowExecution() {
       nodeStatuses: initialRunNodeStatuses(nodes.value, edges.value),
     })
     message.info(t('workflow.actions.executionStarted'))
+    return true
   } catch (err: any) {
     message.error(err?.message || t('workflow.actions.executionFailed'))
+    return false
   } finally {
     executingWorkflow.value = false
   }
 }
 
-async function rerunWorkflowFromNode(nodeId: string, preserveStartNode: boolean) {
+async function rerunWorkflowFromNode(nodeId: string, preserveStartNode: boolean, timeoutMs: number | undefined): Promise<boolean> {
   const workflowId = activeWorkflowId.value
   const run = selectedWorkflowRun.value
-  if (!workflowId || !run || rerunningWorkflowNodeId.value) return
+  if (!workflowId || !run || rerunningWorkflowNodeId.value) return false
   rerunningWorkflowNodeId.value = nodeId
   showWorkflowRunsPanel.value = true
   autoSelectRunningWorkflowIds.value = new Set([...autoSelectRunningWorkflowIds.value, workflowId])
@@ -2160,6 +2271,7 @@ async function rerunWorkflowFromNode(nodeId: string, preserveStartNode: boolean)
   try {
     await rerunWorkflowRunFromNode(workflowId, run.id, nodeId, {
       preserve_start_node: preserveStartNode,
+      ...workflowRunBudgetRequest(timeoutMs),
     })
     void loadWorkflowRuns(workflowId, run.id, {
       silent: true,
@@ -2186,8 +2298,10 @@ async function rerunWorkflowFromNode(nodeId: string, preserveStartNode: boolean)
         ? t('workflow.actions.rerunDownstreamStarted')
         : t('workflow.actions.rerunFromNodeStarted'),
     )
+    return true
   } catch (err: any) {
     message.error(err?.message || t('workflow.actions.rerunFailed'))
+    return false
   } finally {
     rerunningWorkflowNodeId.value = null
   }
@@ -2512,15 +2626,20 @@ function handleContextMenuClickOutside() {
   closeContextMenu()
 }
 
+function requestWorkflowRerun(nodeId: string, preserveStartNode: boolean) {
+  pendingWorkflowRunBudgetAction.value = { kind: 'rerun', nodeId, preserveStartNode }
+  workflowRunBudgetModalVisible.value = true
+}
+
 function handleContextMenuSelect(key: string | number) {
   const target = contextMenuTarget.value
   if (key === 'rerun-downstream-keep-node' && target?.type === 'node') {
-    void rerunWorkflowFromNode(target.id, true)
+    requestWorkflowRerun(target.id, true)
     closeContextMenu()
     return
   }
   if (key === 'rerun-from-node-clear' && target?.type === 'node') {
-    void rerunWorkflowFromNode(target.id, false)
+    requestWorkflowRerun(target.id, false)
     closeContextMenu()
     return
   }
@@ -2893,6 +3012,52 @@ function nodeColor(node: { data: WorkflowAgentNodeData }) {
         </div>
       </header>
     <NModal
+      data-testid="workflow-run-budget-modal"
+      :show="workflowRunBudgetModalVisible"
+      preset="card"
+      :title="pendingWorkflowRunBudgetAction?.kind === 'rerun' ? t('workflow.budget.rerunTitle') : t('workflow.budget.runTitle')"
+      :style="{ width: 'min(480px, calc(100vw - 32px))' }"
+      :mask-closable="!workflowRunBudgetSubmitting"
+      :close-on-esc="!workflowRunBudgetSubmitting"
+      :closable="!workflowRunBudgetSubmitting"
+      @update:show="handleWorkflowRunBudgetVisibility"
+    >
+      <div class="workflow-run-budget-form">
+        <label class="workflow-field">
+          <span class="workflow-field-label">{{ t('workflow.budget.totalLabel') }}</span>
+          <NSelect v-model:value="workflowRunBudgetChoice" :options="workflowRunBudgetOptions" />
+        </label>
+        <label v-if="workflowRunBudgetChoice === 'custom'" class="workflow-field">
+          <span class="workflow-field-label">{{ t('workflow.budget.customMinutes') }}</span>
+          <NInputNumber
+            v-model:value="workflowRunBudgetCustomMinutes"
+            :min="0.1"
+            :max="1440"
+            :step="5"
+            :precision="1"
+            :placeholder="t('workflow.budget.customPlaceholder')"
+            :aria-invalid="!workflowRunBudgetValid"
+            aria-describedby="workflow-run-budget-error"
+          />
+          <span v-if="!workflowRunBudgetValid" id="workflow-run-budget-error" class="workflow-field-error">
+            {{ t('workflow.budget.invalidCustom') }}
+          </span>
+        </label>
+        <p class="workflow-run-budget-help">{{ t('workflow.budget.help') }}</p>
+      </div>
+      <template #footer>
+        <NSpace justify="end">
+          <NButton :disabled="workflowRunBudgetSubmitting" @click="() => closeWorkflowRunBudgetModal()">{{ t('common.cancel') }}</NButton>
+          <NButton
+            type="primary"
+            :disabled="!workflowRunBudgetValid || workflowRunBudgetSubmitting"
+            :loading="workflowRunBudgetSubmitting"
+            @click="confirmWorkflowRunBudget"
+          >{{ t('common.confirm') }}</NButton>
+        </NSpace>
+      </template>
+    </NModal>
+    <NModal
       v-model:show="workspaceModalVisible"
       preset="card"
       :title="t('workflow.workspace.title')"
@@ -2977,7 +3142,7 @@ function nodeColor(node: { data: WorkflowAgentNodeData }) {
           </div>
         </div>
       </aside>
-      <section ref="workflowCanvasRef" class="workflow-canvas" aria-label="Workflow canvas">
+      <section ref="workflowCanvasRef" class="workflow-canvas" :aria-label="t('workflow.canvasAriaLabel')">
         <VueFlow
           :key="workflowFlowKey"
           id="hermes-workflow"
@@ -3017,6 +3182,12 @@ function nodeColor(node: { data: WorkflowAgentNodeData }) {
             <WorkflowConditionEdge v-bind="edgeProps" @edit="openEdgeEditor" />
           </template>
 
+          <div
+            v-if="selectedWorkflowRun" class="workflow-run-snapshot-indicator"
+            role="status"
+          >
+            {{ t('workflow.runs.snapshotIndicator') }}
+          </div>
           <Background :gap="24" :size="1.2" color="var(--border-color)" />
           <MiniMap pannable zoomable :node-color="nodeColor" />
           <Controls />
@@ -3076,6 +3247,9 @@ function nodeColor(node: { data: WorkflowAgentNodeData }) {
               {{ workflowRunNodeCount(run) }} {{ t('workflow.stats.nodes') }}
               <span v-if="run.start_node_ids.length > 0">· {{ t('workflow.runs.startNodes', { count: run.start_node_ids.length }) }}</span>
             </div>
+            <div class="workflow-run-budget-summary" :title="workflowRunBudgetTitle(run)">
+              {{ workflowRunBudgetDetails(run) }}
+            </div>
             <div v-if="run.error" class="workflow-run-error" :title="run.error">{{ run.error }}</div>
           </button>
         </div>
@@ -3115,6 +3289,15 @@ function nodeColor(node: { data: WorkflowAgentNodeData }) {
                 </li>
               </ol>
               <span v-else class="workflow-evidence-empty-path">{{ t('workflow.evidence.noActualPath') }}</span>
+            </div>
+            <div class="workflow-run-budget-evidence" data-testid="workflow-run-budget-evidence">
+              <strong>{{ workflowRunBudgetDetails(selectedWorkflowRun) }}</strong>
+              <span>{{ workflowRunBudgetTitle(selectedWorkflowRun) }}</span>
+              <ul v-if="selectedWorkflowRunBudgetSessions.length > 0">
+                <li v-for="session in selectedWorkflowRunBudgetSessions" :key="session.id">
+                  {{ workflowEditorNodeName(session.node_id) }} · {{ workflowNodeStartBudgetLabel(session.remaining_timeout_ms_at_start) }}
+                </li>
+              </ul>
             </div>
           </div>
           <button
@@ -3779,6 +3962,10 @@ function nodeColor(node: { data: WorkflowAgentNodeData }) {
 .workflow-evidence-actual-path li { position: relative; padding-left: 14px; color: var(--text-primary); font-size: 11px; line-height: 16px; }
 .workflow-evidence-actual-path li::before { content: ''; position: absolute; left: 1px; top: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent-primary); }
 .workflow-evidence-empty-path { color: var(--text-muted); font-size: 11px; }
+.workflow-run-budget-evidence { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--border-light); color: var(--text-muted); font-size: 11px; line-height: 16px; }
+.workflow-run-budget-evidence strong { color: var(--text-primary); }
+.workflow-run-budget-evidence ul { margin: 2px 0 0; padding-left: 16px; }
+.workflow-run-budget-evidence li { margin: 2px 0; }
 .workflow-evidence.expanded {
   flex-basis: 45%;
   max-height: 45%;
@@ -3836,6 +4023,19 @@ function nodeColor(node: { data: WorkflowAgentNodeData }) {
 .workflow-evidence-detail dt { color: var(--text-muted); }
 .workflow-evidence-detail dd { min-width: 0; margin: 0; color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
 .workflow-evidence-detail code { color: var(--accent-primary); white-space: inherit; overflow-wrap: inherit; }
+
+.workflow-run-budget-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.workflow-run-budget-help {
+  margin: 0;
+  color: $text-muted;
+  font-size: 12px;
+  line-height: 18px;
+}
 
 .workflow-create-form {
   display: flex;
@@ -4039,10 +4239,30 @@ function nodeColor(node: { data: WorkflowAgentNodeData }) {
 .workflow-import-input { display: none; }
 
 .workflow-canvas {
+  position: relative;
   min-width: 0;
   min-height: 0;
   background: $bg-primary;
   flex: 1;
+}
+
+.workflow-run-snapshot-indicator {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 8;
+  transform: translateX(-50%);
+  pointer-events: none;
+  padding: 5px 10px;
+  border: 1px solid rgba(var(--accent-info-rgb), 0.28);
+  border-radius: 999px;
+  background: $bg-card;
+  color: $text-secondary;
+  font-size: 11px;
+  line-height: 16px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(8px);
+  white-space: nowrap;
 }
 
 .workflow-runs-panel {
@@ -4340,6 +4560,7 @@ function nodeColor(node: { data: WorkflowAgentNodeData }) {
 .workflow-run-duration,
 .workflow-run-time,
 .workflow-run-meta,
+.workflow-run-budget-summary,
 .workflow-run-error {
   font-size: 11px;
   line-height: 15px;
@@ -4347,8 +4568,15 @@ function nodeColor(node: { data: WorkflowAgentNodeData }) {
 
 .workflow-run-duration,
 .workflow-run-time,
-.workflow-run-meta {
+.workflow-run-meta,
+.workflow-run-budget-summary {
   color: $text-muted;
+}
+
+.workflow-run-budget-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .workflow-run-meta {
