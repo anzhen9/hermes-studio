@@ -2127,8 +2127,37 @@ export default {
   },
 
   workflow: {
-    actions: { importWorkflow: 'Workflow をインポート', exportWorkflow: 'Workflow をエクスポート', imported: 'Workflow をインポートしました', exported: 'Workflow をエクスポートしました', importFailed: 'Workflow のインポートに失敗しました', exportFailed: 'Workflow のエクスポートに失敗しました' },
+    title: 'ワークフロー',
+    profile: 'プロファイル',
+    namePlaceholder: 'ワークフロー名',
+    canvasAriaLabel: 'ワークフローキャンバス',
+    workspace: { title: 'ワークスペースを選択', select: 'ワークスペースを選択', clear: 'ワークスペースをクリア' },
+    actions: {
+      newWorkflow: '新しいワークフロー', addNode: 'ノードを追加', createWorkflowFirst: '先にワークフローを作成してください', reset: 'リセット',
+      startExecution: '実行を開始', executionPending: 'ワークフロー実行はまだ接続されていません', executionStarted: 'ワークフローの実行を開始しました', executionCompleted: 'ワークフローの実行が完了しました', executionFailed: 'ワークフローの実行に失敗しました',
+      rerunDownstreamKeepNode: 'このノードを保持して下流を再実行', rerunDownstreamClearNode: 'このノードをクリアして下流を再実行', rerunDownstreamStarted: '下流の再実行を開始しました', rerunFromNodeStarted: 'このノードから再実行を開始しました', rerunFailed: 'ワークフローの再実行に失敗しました',
+      deleteNode: 'ノードを削除', deleteEdge: '接続を削除', editEdge: '接続を編集', undo: '元に戻す',
+      importWorkflow: 'Workflow をインポート', exportWorkflow: 'Workflow をエクスポート', imported: 'Workflow をインポートしました', exported: 'Workflow をエクスポートしました', importFailed: 'Workflow のインポートに失敗しました', exportFailed: 'Workflow のエクスポートに失敗しました',
+    },
+    batch: { toggle: '一括選択', selectAll: 'すべて選択', confirmDelete: '選択した {count} 件のワークフローを削除しますか？', deleteSuccess: '{count} 件のワークフローを削除しました', deletePartial: '{failed} 件のワークフローを削除できませんでした', deleteFailed: '一括削除に失敗しました' },
+    validation: {
+      nodesRequired: 'ノードを1つ以上追加してください', nodeNameRequired: 'ノード {node} に名前が必要です', providerRequired: 'ノード {node} にプロバイダーが必要です', modelRequired: 'ノード {node} にモデルが必要です', apiModeRequired: 'ノード {node} に API モードが必要です', inputRequired: 'ノード {node} に入力が必要です',
+      invalidEdge: '接続が存在しないノードを参照しています', invalidConnectionDirection: '接続は右側の出力から左側の入力へ向ける必要があります', orphanNode: 'ノード {node} がワークフローに接続されていません', disconnectedFlow: 'ワークフローを複数の分断されたフローに分けることはできません', cycle: 'ワークフローに循環があります。保存前に接続を調整してください。',
+    },
     stats: { nodes: 'ノード', edges: '接続' },
+    runs: {
+      title: '実行記録', refresh: '更新', empty: '実行記録はありません', startNodes: '開始ノード {count} 件', snapshotIndicator: 'この実行の開始時点で固定されたスナップショット', show: '実行記録を表示', hide: '実行記録を隠す',
+      nodeSessionTitle: 'ノードセッション - {node}', noNodeSession: 'このノードにはまだセッション記録がありません', loadNodeSessionFailed: 'ノードセッションの読み込みに失敗しました', stop: '実行を停止', stopRequested: '停止を要求しました', stopFailed: '実行の停止に失敗しました', delete: '記録を削除', deleteSuccess: '実行記録を削除しました',
+    },
+    inspector: { selected: '選択中のノード', none: 'ノードが選択されていません' },
+    agents: { planner: '計画担当', researcher: '調査担当', builder: '実装担当', reviewer: 'レビュー担当' },
+    models: { default: '既定のモデル', fast: '高速モデル', reasoning: '推論モデル' },
+    initialNodes: { node1: 'ノード 1', node2: 'ノード 2', node3: 'ノード 3', plan: '計画', execute: '実行', review: 'レビュー' },
+    initialPrompts: {
+      node1: 'このノードの入力を記入してください。', node2: 'このノードの入力を記入してください。', node3: 'このノードの入力を記入してください。',
+      plan: '依頼を実行可能な手順に分解してください。', execute: '実装手順を実行して成果物を作成してください。', review: '出力品質を確認し、追加作業を特定してください。',
+    },
+    newNodeTitle: 'ノード {count}',
     evidence: {
       ariaLabel: 'Workflow 実行詳細', title: '実行詳細', count: '{count} 件',
       intro: 'この実行の経路判定、ループ回数、異常ノードを表示します。', empty: '実行詳細はありません', loadFailed: '保存済みの実行詳細を読み込めませんでした',
@@ -2144,6 +2173,15 @@ export default {
       routes: { success: '成功後に続行', failure: '失敗後に続行', always: '結果にかかわらず続行' },
       reasons: { evaluationFailed: '経路判定に失敗しました', conditionNotMatched: '条件が一致しませんでした', iterationLimitReached: '最大ループ回数に到達しました', routeNotMatched: '経路が一致しませんでした', pathSelected: 'この経路が選択されました。', sourceSkipped: '上流ノードが実行されなかったため、この経路は今回使用されませんでした。', failureRouteAfterSuccess: '上流ノードは正常に返答しました。この経路はノード実行失敗時のみ使用されます。', successRouteAfterFailure: '上流ノードの実行に失敗しました。この経路は正常返答時のみ使用されます。', businessBlocked: '「{source}」がワークフローを停止しました（{decision}）：{reason}。そのため「{target}」は実行されませんでした。', businessBlockedWithCondition: '「{source}」がワークフローを停止しました（{decision}）：{reason}。続行には「{expected}」が必要でしたが、上流の結果は「{actual}」だったため、「{target}」は実行されませんでした。', conditionMismatchDetail: '続行には「{expected}」が必要でしたが、上流の結果は「{actual}」だったため、「{target}」は実行されませんでした。' },
       loopOutcomes: { continued: '条件一致、次の回へ続行', iterationLimitReached: '最大回数で停止', conditionNotMatched: '条件不一致で終了', finished: 'ループ終了' },
+    },
+    budget: {
+      runTitle: 'Run の時間予算を選択', rerunTitle: 'Rerun の時間予算を選択', totalLabel: 'Run 全体の予算',
+      customMinutes: 'カスタム分数', customPlaceholder: '分', invalidCustom: 'カスタム Run 予算は 0.1〜1440 分で指定してください',
+      help: 'Run 全体で共有する絶対期限です。各ノードには開始時点の残り時間だけが渡され、ループで予算はリセットされません。',
+      options: { unlimited: '期限なし', '30': '30 分', '60': '60 分', '90': '90 分', custom: 'カスタム' },
+      unlimitedSummary: '期限なし', unlimitedHelp: 'この Run には期限が設定されていません。',
+      summary: '合計 {total} · 経過 {elapsed} · 残り {remaining}', deadline: '期限：{deadline}',
+      nodeStartRemaining: 'ノード開始時の残り総予算：{remaining}',
     },
     edgeEditor: {
       title: '接続を編集', guideIntro: 'まず上流ノードに必要な実行結果を選びます。次に、応答を確認しない、全文を文字列として確認する、または解析済み JSON の 1 フィールド値を比較する方法を選びます。',
@@ -2193,13 +2231,13 @@ export default {
       loopId: 'ループ識別子', loopIdPlaceholder: '自動を選ぶかカスタム ID を入力', loopIdAutomatic: '自動（推奨）· {id}', loopIdHelp: '実行履歴でループを識別するだけで、実行条件は変わりません。通常は自動のままにします。', invalidLoopId: 'ループ ID の形式が正しくありません',
     },
     node: {
-      approvalRequired: '完了後承認',
+      title: 'ノード名', agent: 'エージェント', model: 'モデル', apiMode: 'API モード', input: '入力', approvalRequired: '完了後承認',
       join: '合流方法', joinAll: 'すべての入力ルート', joinAny: 'いずれかの入力ルート',
       joinAllHelp: 'すべての入力ルートが有効な場合のみ実行し、1つでも不一致ならスキップします。', joinAnyHelp: '最初の有効な入力ルートで1回実行し、すべて不一致の場合のみスキップします。',
+      promptPlaceholder: 'このエージェントが行う内容を入力してください...', skillsPlaceholder: 'スキルを入力し、Enter で追加', uploadImages: '画像をアップロード',
     },
     status: {
-      pending_approval: '承認待ち',
-      approval_rejected: '承認拒否',
+      idle: '待機中', queued: '待機列', running: '実行中', pending_approval: '承認待ち', completed: '完了', skipped: 'スキップ', failed: '失敗', approval_rejected: '承認拒否', canceled: 'キャンセル済み',
     },
   },
 
@@ -2216,6 +2254,7 @@ export default {
   },
 
   files: {
+    attachToChat: 'チャットに追加', attachFailed: 'ファイルをチャットに追加できませんでした',
     previewMode: 'プレビュー', sourceMode: 'ソース', tableMode: '表', worksheet: 'ワークシート',
     htmlPreviewTitle: '分離された HTML プレビュー', previewLoading: 'プレビューを読み込み中...', previewFailed: 'プレビューできません',
     previewMimeMismatch: 'ファイル形式がプレビュー形式と一致しません。', downloadInstead: '代わりにダウンロード',
@@ -2225,6 +2264,16 @@ export default {
   },
 
   changelog: {
+    new_0_6_32_1: 'このリリースには 0.6.31 以降にマージされた全 14 PR が含まれ、セッション整理と圧縮、グループチャット、Workflow ルーティング、Skill Bundle、Ekko メモリ、Hermes 0.19、デスクトップのウィンドウ UI を改善します',
+    new_0_6_32_2: "グループチャットの {'@'}メンションが CJK テキスト、絵文字、句読点の直後でも動作し、ルーム所有者は設定から招待コードの確認、生成、更新ができます（#2133、#2141）",
+    new_0_6_32_3: 'Workflow はハンドオフや再接続をまたいで各 Hermes Bridge 実行元を保持し、スコープ付き Codex / Claude Code ノードは有効な API Key ターゲットに launcher 対応プロトコルを利用できます（#2137、#2154）',
+    new_0_6_32_4: 'セッションにグローバルカテゴリ、Markdown を考慮した高精度検索、編集・分岐・同時実行でも整合性を保ちながら履歴を制限するカーソルベース圧縮を追加し、圧縮設計も完全に文書化しました（#2139、#2143、#2145、#2146）',
+    new_0_6_32_5: 'Profile 単位の Skill Bundle をチャットから直接作成、参照、実行、削除でき、含まれる Skill も明確に確認できます（#2156）',
+    new_0_6_32_6: 'Ekko メモリは Profile ごとに分離された単一の正規モデルを採用し、revision 検証付き変更、強化された出典監査、より厳密な関連性フィルタリングに対応しました（#2159）',
+    new_0_6_32_7: 'Hermes 0.19 のアシスタント中間メッセージを独立した吹き出しとして配信・保存し、通常の個別チャットではバックグラウンド委任の永続的な結果を非同期で受信できます（#2160）',
+    new_0_6_32_8: '新しいデスクトップ Runtime ビルド、フォールバックパス、Windows CLI shim は Hermes Agent 0.19.0 を既定で使用します（#2161）',
+    new_0_6_32_9: 'デスクトップのウィンドウ操作をページ UI に統合し、macOS の信号ボタンはサイドバー、Windows の操作ボタンはメインコンテンツ上部に配置し、Linux はネイティブ装飾を維持します（#2162）',
+    new_0_6_32_10: '開発者向けドキュメントは現在の checkout と、必要に応じた分離 Git worktree の両方に対応しました（#2155）',
     new_0_6_31_1: '本リリースには 0.6.30 以降にマージされた全 25 件の PR が含まれ、Workflow のルーティングと再生、生成ファイルのプレビュー、Provider 編集、チャット強化、Desktop の更新と表示改善を行いました',
     new_0_6_31_2: 'Workflow は構造化 JSON 条件、より明確なブロック経路の証跡、完全な実行記録モーダル、実際の履歴経路の再生に対応しました（#2088、#2093、#2099、#2128）',
     new_0_6_31_3: '生成された HTML、PDF、DOCX、PPTX、XLSX、CSV、画像、Markdown、ソースファイルを、Profile ファイル、セッション workspace、管理対象グループ workspace で安全にプレビューできます（#2110、#2113）',
