@@ -2127,8 +2127,37 @@ export default {
   },
 
   workflow: {
-    actions: { importWorkflow: 'Workflow 가져오기', exportWorkflow: 'Workflow 내보내기', imported: 'Workflow를 가져왔습니다', exported: 'Workflow를 내보냈습니다', importFailed: 'Workflow 가져오기에 실패했습니다', exportFailed: 'Workflow 내보내기에 실패했습니다' },
+    title: '워크플로',
+    profile: '프로필',
+    namePlaceholder: '워크플로 이름',
+    canvasAriaLabel: '워크플로 캔버스',
+    workspace: { title: '작업 공간 선택', select: '작업 공간 선택', clear: '작업 공간 지우기' },
+    actions: {
+      newWorkflow: '새 워크플로', addNode: '노드 추가', createWorkflowFirst: '먼저 워크플로를 만들어 주세요', reset: '초기화',
+      startExecution: '실행 시작', executionPending: '워크플로 실행이 아직 연결되지 않았습니다', executionStarted: '워크플로 실행을 시작했습니다', executionCompleted: '워크플로 실행이 완료되었습니다', executionFailed: '워크플로 실행에 실패했습니다',
+      rerunDownstreamKeepNode: '이 노드를 유지하고 하위 노드 실행', rerunDownstreamClearNode: '이 노드를 지우고 하위 노드 실행', rerunDownstreamStarted: '하위 노드 재실행을 시작했습니다', rerunFromNodeStarted: '이 노드부터 재실행을 시작했습니다', rerunFailed: '워크플로 재실행에 실패했습니다',
+      deleteNode: '노드 삭제', deleteEdge: '연결 삭제', editEdge: '연결 편집', undo: '실행 취소',
+      importWorkflow: 'Workflow 가져오기', exportWorkflow: 'Workflow 내보내기', imported: 'Workflow를 가져왔습니다', exported: 'Workflow를 내보냈습니다', importFailed: 'Workflow 가져오기에 실패했습니다', exportFailed: 'Workflow 내보내기에 실패했습니다',
+    },
+    batch: { toggle: '일괄 선택', selectAll: '모두 선택', confirmDelete: '선택한 워크플로 {count}개를 삭제할까요?', deleteSuccess: '워크플로 {count}개를 삭제했습니다', deletePartial: '워크플로 {failed}개를 삭제하지 못했습니다', deleteFailed: '일괄 삭제에 실패했습니다' },
+    validation: {
+      nodesRequired: '노드를 하나 이상 추가해 주세요', nodeNameRequired: '노드 {node}에 이름이 필요합니다', providerRequired: '노드 {node}에 제공자가 필요합니다', modelRequired: '노드 {node}에 모델이 필요합니다', apiModeRequired: '노드 {node}에 API 모드가 필요합니다', inputRequired: '노드 {node}에 입력이 필요합니다',
+      invalidEdge: '연결이 존재하지 않는 노드를 참조합니다', invalidConnectionDirection: '연결은 오른쪽 출력에서 왼쪽 입력으로 이어져야 합니다', orphanNode: '노드 {node}가 워크플로에 연결되지 않았습니다', disconnectedFlow: '워크플로를 서로 분리된 여러 흐름으로 나눌 수 없습니다', cycle: '워크플로에 순환이 있습니다. 저장하기 전에 연결을 조정해 주세요.',
+    },
     stats: { nodes: '노드', edges: '연결' },
+    runs: {
+      title: '실행 기록', refresh: '새로 고침', empty: '실행 기록 없음', startNodes: '시작 노드 {count}개', snapshotIndicator: '이 실행이 시작된 시점의 고정 스냅샷', show: '실행 기록 표시', hide: '실행 기록 숨기기',
+      nodeSessionTitle: '노드 세션 - {node}', noNodeSession: '이 노드에는 아직 세션 기록이 없습니다', loadNodeSessionFailed: '노드 세션을 불러오지 못했습니다', stop: '실행 중지', stopRequested: '중지를 요청했습니다', stopFailed: '실행을 중지하지 못했습니다', delete: '기록 삭제', deleteSuccess: '실행 기록을 삭제했습니다',
+    },
+    inspector: { selected: '선택한 노드', none: '선택한 노드 없음' },
+    agents: { planner: '계획 담당', researcher: '조사 담당', builder: '구현 담당', reviewer: '검토 담당' },
+    models: { default: '기본 모델', fast: '빠른 모델', reasoning: '추론 모델' },
+    initialNodes: { node1: '노드 1', node2: '노드 2', node3: '노드 3', plan: '계획', execute: '실행', review: '검토' },
+    initialPrompts: {
+      node1: '이 노드의 입력을 작성하세요.', node2: '이 노드의 입력을 작성하세요.', node3: '이 노드의 입력을 작성하세요.',
+      plan: '요청을 실행 가능한 단계로 나누세요.', execute: '구현 단계를 실행하고 결과물을 만드세요.', review: '출력 품질을 검토하고 후속 작업을 식별하세요.',
+    },
+    newNodeTitle: '노드 {count}',
     evidence: {
       ariaLabel: 'Workflow 실행 세부 정보', title: '실행 세부 정보', count: '{count}개',
       intro: '이번 실행의 경로 결정, 반복 횟수, 예외 노드를 표시합니다.', empty: '실행 세부 정보 없음', loadFailed: '저장된 실행 세부 정보를 불러오지 못했습니다',
@@ -2144,6 +2173,15 @@ export default {
       routes: { success: '성공 후 계속', failure: '실패 후 계속', always: '결과와 관계없이 계속' },
       reasons: { evaluationFailed: '경로 판단 실패', conditionNotMatched: '조건이 일치하지 않음', iterationLimitReached: '최대 반복 횟수 도달', routeNotMatched: '경로가 일치하지 않음', pathSelected: '이 경로가 선택되었습니다.', sourceSkipped: '상위 노드가 실행되지 않아 이번 실행에서 이 경로를 사용하지 않았습니다.', failureRouteAfterSuccess: '상위 노드는 정상 응답했습니다. 이 경로는 노드 실행 실패 시에만 사용됩니다.', successRouteAfterFailure: '상위 노드 실행이 실패했습니다. 이 경로는 정상 응답 시에만 사용됩니다.', businessBlocked: '“{source}” 단계가 워크플로를 중단했습니다({decision}): {reason}. 따라서 “{target}” 단계는 실행되지 않았습니다.', businessBlockedWithCondition: '“{source}” 단계가 워크플로를 중단했습니다({decision}): {reason}. 계속하려면 “{expected}”이(가) 필요했지만 상위 결과는 “{actual}”이었으므로 “{target}” 단계는 실행되지 않았습니다.', conditionMismatchDetail: '계속하려면 “{expected}”이(가) 필요했지만 상위 결과는 “{actual}”이었으므로 “{target}” 단계는 실행되지 않았습니다.' },
       loopOutcomes: { continued: '조건 일치; 다음 회차로 계속', iterationLimitReached: '최대 횟수에서 중지', conditionNotMatched: '조건 불일치로 종료', finished: '루프 종료' },
+    },
+    budget: {
+      runTitle: 'Run 시간 예산 선택', rerunTitle: 'Rerun 시간 예산 선택', totalLabel: '전체 Run 예산',
+      customMinutes: '사용자 지정 분', customPlaceholder: '분', invalidCustom: '사용자 지정 Run 예산은 0.1~1440분이어야 합니다',
+      help: '전체 Run이 공유하는 절대 마감 시간입니다. 각 노드는 시작 시점의 남은 시간만 받으며 반복은 예산을 재설정하지 않습니다.',
+      options: { unlimited: '마감 없음', '30': '30분', '60': '60분', '90': '90분', custom: '사용자 지정' },
+      unlimitedSummary: '마감 없음', unlimitedHelp: '이 Run에는 시간 마감이 설정되지 않았습니다.',
+      summary: '전체 {total} · 경과 {elapsed} · 남음 {remaining}', deadline: '마감: {deadline}',
+      nodeStartRemaining: '노드 시작 시 남은 전체 예산: {remaining}',
     },
     edgeEditor: {
       title: '연결 편집', guideIntro: '먼저 상위 노드에 필요한 실행 결과를 선택합니다. 그런 다음 응답을 검사하지 않거나, 전체 텍스트를 문자 그대로 검사하거나, 파싱된 JSON 필드 하나의 값을 비교합니다.',
@@ -2193,13 +2231,13 @@ export default {
       loopId: '루프 식별자', loopIdPlaceholder: '자동 선택 또는 사용자 ID 입력', loopIdAutomatic: '자동 (권장) · {id}', loopIdHelp: '실행 기록에서 루프를 표시할 뿐 실행 조건은 바꾸지 않습니다. 보통 자동을 유지하세요.', invalidLoopId: '루프 ID 형식이 올바르지 않습니다',
     },
     node: {
-      approvalRequired: '완료 후 승인',
+      title: '노드 이름', agent: '에이전트', model: '모델', apiMode: 'API 모드', input: '입력', approvalRequired: '완료 후 승인',
       join: '합류 전략', joinAll: '모든 입력 경로', joinAny: '입력 경로 중 하나',
       joinAllHelp: '모든 입력 경로가 선택되어야 실행하며 하나라도 불일치하면 건너뜁니다.', joinAnyHelp: '첫 번째 입력 경로가 선택되면 한 번 실행하며 모두 불일치할 때만 건너뜁니다.',
+      promptPlaceholder: '이 에이전트가 수행할 작업을 설명하세요...', skillsPlaceholder: '스킬을 입력하고 Enter로 추가', uploadImages: '이미지 업로드',
     },
     status: {
-      pending_approval: '승인 대기',
-      approval_rejected: '승인 거부',
+      idle: '대기', queued: '대기열', running: '실행 중', pending_approval: '승인 대기', completed: '완료', skipped: '건너뜀', failed: '실패', approval_rejected: '승인 거부', canceled: '취소됨',
     },
   },
 
@@ -2216,6 +2254,7 @@ export default {
   },
 
   files: {
+    attachToChat: '채팅에 추가', attachFailed: '파일을 채팅에 추가하지 못했습니다',
     previewMode: '미리보기', sourceMode: '소스', tableMode: '표', worksheet: '워크시트',
     htmlPreviewTitle: '격리된 HTML 미리보기', previewLoading: '미리보기 불러오는 중...', previewFailed: '미리보기를 사용할 수 없음',
     previewMimeMismatch: '파일 형식이 미리보기 형식과 일치하지 않습니다.', downloadInstead: '대신 다운로드',
@@ -2225,6 +2264,16 @@ export default {
   },
 
   changelog: {
+    new_0_6_32_1: '이번 릴리스에는 0.6.31 이후 병합된 14개 PR이 모두 포함되며 세션 구성과 압축, 그룹 채팅, Workflow 라우팅, Skill Bundle, Ekko 메모리, Hermes 0.19 및 데스크톱 창 UI를 개선합니다',
+    new_0_6_32_2: "그룹 채팅 {'@'}멘션이 CJK 텍스트, 이모지, 문장 부호 뒤에서도 작동하며 방 소유자는 설정에서 초대 코드를 확인하고 생성하거나 교체할 수 있습니다(#2133, #2141)",
+    new_0_6_32_3: 'Workflow는 핸드오프와 재연결 과정에서도 각 Hermes Bridge 실행 출처를 보존하며 범위가 지정된 Codex 및 Claude Code 노드는 유효한 API Key 대상에 launcher 지원 프로토콜을 사용할 수 있습니다(#2137, #2154)',
+    new_0_6_32_4: '세션에 전역 카테고리, Markdown을 인식하는 더 정확한 검색 순위, 편집·분기·동시 실행에서도 정확성을 유지하며 기록을 제한하는 커서 기반 압축이 추가되었고 전체 압축 설계도 문서화되었습니다(#2139, #2143, #2145, #2146)',
+    new_0_6_32_5: 'Profile 범위 Skill Bundle을 채팅에서 직접 만들고 탐색하고 실행하고 삭제할 수 있으며 포함된 Skill도 명확히 확인할 수 있습니다(#2156)',
+    new_0_6_32_6: 'Ekko 메모리는 Profile별로 격리된 단일 표준 모델을 사용하며 revision 검증 변경, 강화된 출처 감사, 더 엄격한 관련성 필터링을 지원합니다(#2159)',
+    new_0_6_32_7: 'Hermes 0.19의 어시스턴트 중간 메시지가 별도 말풍선으로 스트리밍 및 저장되며 일반 1:1 채팅은 백그라운드 위임의 영구 결과를 비동기로 전달받을 수 있습니다(#2160)',
+    new_0_6_32_8: '새 데스크톱 Runtime 빌드, 대체 경로 및 Windows CLI shim은 이제 Hermes Agent 0.19.0을 기본으로 사용합니다(#2161)',
+    new_0_6_32_9: '데스크톱 창 컨트롤을 페이지 UI에 통합하여 macOS 신호등 버튼은 사이드바에, Windows 컨트롤은 메인 콘텐츠 위에 배치하고 Linux는 기본 창 장식을 유지합니다(#2162)',
+    new_0_6_32_10: '개발자 문서는 이제 현재 checkout과 선택적인 격리 Git worktree 방식을 모두 지원합니다(#2155)',
     new_0_6_31_1: '이번 릴리스에는 0.6.30 이후 병합된 25개 PR 전체가 포함되며 Workflow 라우팅과 재생, 생성 파일 미리보기, Provider 편집, 채팅 개선, Desktop 업데이트와 시각적 완성도를 다룹니다',
     new_0_6_31_2: 'Workflow에 구조화된 JSON 조건, 더 명확한 차단 경로 근거, 전체 실행 기록 모달, 실제 과거 경로 재생이 추가되었습니다 (#2088, #2093, #2099, #2128)',
     new_0_6_31_3: '생성된 HTML, PDF, DOCX, PPTX, XLSX, CSV, 이미지, Markdown, 소스 파일을 Profile 파일, 세션 workspace, 관리형 그룹 workspace에서 안전하게 미리볼 수 있습니다 (#2110, #2113)',
