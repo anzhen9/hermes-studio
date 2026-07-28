@@ -9,6 +9,15 @@ describe('ChatPanel session clicks', () => {
     expect(source).toContain('await chatStore.switchSession(sessionId)')
   })
 
+  it('opens desktop sessions in a native chat window while preserving the web tab fallback', () => {
+    const source = readFileSync('packages/client/src/components/hermes/chat/ChatPanel.vue', 'utf8')
+
+    expect(source).toContain('bridge.openChatWindow(sessionId, sessionProfile(sessionId) || undefined)')
+    expect(source).toContain('window.open(sessionHref(sessionId), "_blank", "noopener,noreferrer")')
+    expect(source).toContain('v-if="currentMode === \'chat\' && !standalone"')
+    expect(source).toContain('<header v-if="!standalone" class="chat-header">')
+  })
+
   it('replays the whole chat surface fade without remounting the input', () => {
     const source = readFileSync('packages/client/src/components/hermes/chat/ChatPanel.vue', 'utf8')
 
@@ -55,6 +64,14 @@ describe('ChatPanel session clicks', () => {
     expect(source).toContain('const selectedModel = appStore.selectedModel || ""')
     expect(source).toContain('profile === activeProfileName')
     expect(source).toContain('selectedGroup?.models.includes(selectedModel)')
+  })
+
+  it('offers Ekko Agent when creating chats in production builds', () => {
+    const source = readFileSync('packages/client/src/components/hermes/chat/ChatPanel.vue', 'utf8')
+
+    expect(source).toContain('{ label: "Ekko Agent", value: "ekko-agent" }')
+    expect(source).not.toContain('showEkkoAgentEntry')
+    expect(source).not.toContain('import.meta.env.DEV')
   })
 
   it('uses a create action in the new chat drawer instead of duplicating the new chat trigger label', () => {

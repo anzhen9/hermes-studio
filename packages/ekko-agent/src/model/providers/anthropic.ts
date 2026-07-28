@@ -35,9 +35,14 @@ interface AnthropicPayload {
 
 type AnthropicContentBlock =
   | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
   | { type: 'thinking'; thinking: string }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-  | { type: 'tool_result'; tool_use_id: string; content: string }
+  | { type: 'tool_result'; tool_use_id: string; content: string | Array<AnthropicToolResultContent> }
+
+type AnthropicToolResultContent =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
 
 interface AnthropicResponse {
   id?: string
@@ -55,7 +60,7 @@ interface AnthropicResponse {
 const capabilities: ModelCapabilities = {
   streaming: true,
   tools: true,
-  vision: false,
+  vision: true,
   jsonMode: false,
   systemPrompt: true,
 }
@@ -200,13 +205,37 @@ function toAnthropicMessage(message: AgentMessage): AnthropicPayload['messages']
   }
 
   if (message.role === 'tool') {
+    const images = message.contentParts?.filter(part => part.type === 'image') ?? []
     return {
       role: 'user',
-      content: [{ type: 'tool_result', tool_use_id: message.toolCallId ?? '', content: message.content }],
+      content: [{
+        type: 'tool_result',
+        tool_use_id: message.toolCallId ?? '',
+        content: images.length
+          ? [
+              { type: 'text', text: message.content },
+              ...images.map(image => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: image.mimeType, data: image.data } })),
+            ]
+          : message.content,
+      }],
     }
   }
 
-  return { role: 'user', content: [{ type: 'text', text: message.content }] }
+  const images = message.contentParts?.filter(part => part.type === 'image') ?? []
+  return {
+    role: 'user',
+    content: [
+      ...(message.content ? [{ type: 'text' as const, text: message.content }] : []),
+      ...images.map(image => ({
+        type: 'image' as const,
+        source: {
+          type: 'base64' as const,
+          media_type: image.mimeType,
+          data: image.data,
+        },
+      })),
+    ],
+  }
 }
 
 function toAnthropicTool(tool: AgentToolDefinition): NonNullable<AnthropicPayload['tools']>[number] {

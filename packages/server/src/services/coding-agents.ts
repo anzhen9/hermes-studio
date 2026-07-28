@@ -10,7 +10,7 @@ import { PROVIDER_ENV_MAP, readConfigYamlForProfile, safeReadFile } from './conf
 import { getCompatibleCustomProviders } from './hermes/custom-providers-compat'
 import { registerClaudeCodeProxyTarget } from './agent-runner/proxies/claude-code-proxy'
 import { registerCodexProxyTarget } from './agent-runner/proxies/codex-proxy'
-import type { ApiMode } from './agent-runner/types'
+import type { ApiMode, CodingAgentImageInput } from './agent-runner/types'
 import { PROVIDER_PRESETS } from '../shared/providers'
 import { getModelContextLength } from './hermes/model-context'
 import { getProfileDir } from './hermes/hermes-profile'
@@ -31,11 +31,12 @@ const POSIX_LAUNCHER_FILE = 'launch.sh'
 const WINDOWS_LAUNCHER_FILE = 'launch.ps1'
 const CLAUDE_CODE_SKIP_PERMISSIONS_ARGS = ['--dangerously-skip-permissions']
 const CLAUDE_CODE_ROOT_PERMISSION_ARGS = ['--permission-mode', 'auto']
-const HERMES_MCP_SERVERS = [
+const HERMES_MCP_SERVERS: ReadonlyArray<{ name: string; toolset: string }> = [
   { name: 'hermes-studio-api', toolset: 'api' },
+  { name: 'hermes-studio-browser', toolset: 'browser' },
   { name: 'hermes-studio-devices', toolset: 'devices' },
   { name: 'hermes-studio-use', toolset: 'use' },
-] as const
+]
 const HERMES_MCP_SERVER_NAMES: Set<string> = new Set(HERMES_MCP_SERVERS.map(server => server.name))
 const LEGACY_HERMES_MCP_SERVER_NAMES = new Set(['hermes-studio', 'hermes-studio-mcp', 'hermes-web-ui-mcp'])
 const LEGACY_HERMES_MCP_COMMANDS = new Set([
@@ -697,7 +698,7 @@ function codexCatalogEntry(input: {
     max_context_window: input.contextWindow,
     effective_context_window_percent: 95,
     experimental_supported_tools: [],
-    input_modalities: ['text'],
+    input_modalities: ['text', 'image'],
     supports_search_tool: true,
   }
 }
@@ -1932,8 +1933,14 @@ export async function startCodingAgentRun(
   }
 }
 
-export function sendCodingAgentRunInput(sessionId: string, input: string, systemPrompt?: string): { runId: string } {
-  return codingAgentRunManager.send(sessionId, input, { systemPrompt })
+export function sendCodingAgentRunInput(
+  sessionId: string,
+  input: string,
+  systemPrompt?: string,
+  images: CodingAgentImageInput[] = [],
+  storageInput?: string,
+): { runId: string } {
+  return codingAgentRunManager.send(sessionId, input, { systemPrompt, images, storageInput })
 }
 
 export function stopCodingAgentRun(sessionId: string): { stopped: boolean } {

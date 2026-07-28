@@ -53,7 +53,7 @@ export class AgentRuntime {
     this.modelClient = options.modelClient
     this.toolsEnabled = options.toolsEnabled !== false
     this.tools = this.toolsEnabled
-      ? options.tools ?? createDefaultToolRegistry()
+      ? options.tools ?? createDefaultToolRegistry({ skillDirectory: options.skillDirectory })
       : new AgentToolRegistry()
     this.skillsEnabled = options.skillsEnabled !== false
     this.skills = this.skillsEnabled ? options.skills ?? [] : []
@@ -88,6 +88,21 @@ export class AgentRuntime {
     await this.tools.refreshTools(context)
   }
 
+  /**
+   * Estimate the provider-visible context without starting a model run.
+   *
+   * Hosts that own conversation compaction can use this to account for Ekko's
+   * system prompt, tools, and provider context while keeping compaction itself
+   * outside the runtime.
+   */
+  async estimateContext(input: AgentRuntimeRunInput): Promise<AgentRuntimeContextEstimate> {
+    await this.refreshTools(this.runToolContext(input))
+    const modelClient = this.modelClientFor(input)
+    const messages = this.prepareMessages(input)
+    const request = this.modelRequest(input, messages, modelClient, this.contextKeyFor(input))
+    return estimateModelRequestContext(request)
+  }
+
   async run(input: AgentRuntimeRunInput): Promise<AgentRuntimeRunResult> {
     await this.refreshTools(this.runToolContext(input))
 
@@ -106,7 +121,6 @@ export class AgentRuntime {
     emit({ type: 'run.started', runId, maxSteps })
 
     const inputSkills = this.skillsEnabled ? input.skills ?? [] : []
-    const runSkills = [...this.skills, ...inputSkills]
     this.registerSkillTools(inputSkills)
     const memoryIdentity = this.memoryIdentityFor(input)
     const memoryPreparation = await this.prepareMemory(input, memoryIdentity)
@@ -120,7 +134,7 @@ export class AgentRuntime {
         memoryIds: memoryContext.usedMemoryIds,
       })
     }
-    const messages = this.prepareMessages(input, runSkills, memoryContext ? this.memory?.contextPrompt(memoryContext) : undefined)
+    const messages = this.prepareMessages(input, memoryContext ? this.memory?.contextPrompt(memoryContext) : undefined)
     let output: AgentOutputMessage = {
       role: 'assistant',
       content: '',
@@ -178,7 +192,7 @@ export class AgentRuntime {
             input.signal,
           )
           throwIfAborted(input.signal)
-          messages.push(createToolResultMessage(toolCall.id, result.content, toolCall.name))
+          messages.push(createToolResultMessage(toolCall.id, result.content, toolCall.name, result.contentParts))
           steps.push({ type: 'tool', step, toolCallId: toolCall.id, toolName: toolCall.name, result })
           consecutiveToolFailures = result.ok ? 0 : consecutiveToolFailures + 1
           if (maxConsecutiveToolFailures > 0 && consecutiveToolFailures >= maxConsecutiveToolFailures) {
@@ -291,7 +305,7 @@ export class AgentRuntime {
     }
   }
 
-  private prepareMessages(input: AgentRuntimeRunInput, skills: AgentSkill[], memoryContext?: string): AgentMessage[] {
+  private prepareMessages(input: AgentRuntimeRunInput, memoryContext?: string): AgentMessage[] {
     const normalized = normalizeAgentMessages(input.messages)
     const userSystemMessages = normalized.filter(message => message.role === 'system').map(message => message.content)
     const nonSystemMessages = normalized.filter(message => message.role !== 'system')
@@ -301,8 +315,10 @@ export class AgentRuntime {
       basePrompt: input.systemPrompt ?? this.systemPrompt,
       runtimeInstructions: this.runtimeInstructions,
       userSystemMessages,
-      skills,
       memoryContext,
+      skillDiscoveryEnabled: this.toolsEnabled &&
+        !!this.tools.get('skill_list') &&
+        !!this.tools.get('skill_view'),
       context: {
         provider: modelClient.provider,
         model: input.model ?? input.modelDefaults?.model ?? this.modelDefaults?.model,

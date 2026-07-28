@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useMessage, NInput, NButton, NSpace, NSelect, NPopover, NPopconfirm, NInputNumber, NDropdown, NModal, type DropdownOption } from 'naive-ui'
 import { useGroupChatStore } from '@/stores/hermes/group-chat'
+import { useAppStore } from '@/stores/hermes/app'
 import { useProfilesStore } from '@/stores/hermes/profiles'
 import { updateRoomConfig, forceCompress } from '@/api/hermes/group-chat'
 import GroupMessageList from './GroupMessageList.vue'
@@ -17,24 +18,37 @@ import type { Attachment } from '@/stores/hermes/chat'
 import type { RoomAgent, RoomInfo } from '@/api/hermes/group-chat'
 import { useFilesStore } from '@/stores/hermes/files'
 import { useToolPanelStore } from '@/stores/hermes/tool-panel'
+import { hasDesktopBrowserBridge } from '@/utils/desktop-bridge'
+import { OPEN_DESKTOP_BROWSER_PANEL_EVENT } from '@/utils/desktop-browser'
 
 const FilesPanel = defineAsyncComponent(async () => (await import('@/components/hermes/chat/FilesPanel.vue')).default)
 const FilePreview = defineAsyncComponent(async () => (await import('@/components/hermes/files/FilePreview.vue')).default)
 const WorkspaceDiffPreview = defineAsyncComponent(async () => (await import('@/components/hermes/files/WorkspaceDiffPreview.vue')).default)
+const DesktopBrowserPanel = defineAsyncComponent(async () => (await import('@/components/hermes/chat/DesktopBrowserPanel.vue')).default)
 
 const { t } = useI18n()
 const router = useRouter()
 const message = useMessage()
+const appStore = useAppStore()
 const store = useGroupChatStore()
 const profilesStore = useProfilesStore()
 const filesStore = useFilesStore()
 const toolPanelStore = useToolPanelStore()
 
 const showSidebar = ref(window.innerWidth > 768)
+watch(
+    showSidebar,
+    expanded => appStore.setPageSidebarExpanded(expanded),
+    { immediate: true },
+)
 const showCreateModal = ref(false)
 const showCloneModal = ref(false)
 const showAddAgentModal = ref(false)
 const showCompressionModal = ref(false)
+const showUserProfileModal = ref(false)
+const userProfileName = ref('')
+const userProfileDescription = ref('')
+const isSavingUserProfile = ref(false)
 const compressionConfig = ref({ triggerTokens: 100000, maxHistoryTokens: 32000, tailMessageCount: 10 })
 const isCompressing = ref(false)
 const inviteCodeDraft = ref('')
@@ -54,6 +68,8 @@ const chatDropCounter = ref(0)
 const isChatDropActive = ref(false)
 const groupChatContentWrapperRef = ref<HTMLElement | null>(null)
 const showWorkspacePanel = ref(false)
+const activeWorkspacePanel = ref<'files' | 'browser'>('files')
+const desktopBrowserAvailable = hasDesktopBrowserBridge()
 const workspacePanelMobile = ref(window.innerWidth <= 768)
 const WORKSPACE_PANEL_MIN_WIDTH = 360
 const WORKSPACE_PANEL_DEFAULT_WIDTH = 560
@@ -185,8 +201,35 @@ function closeWorkspacePanel(): void {
 
 function toggleWorkspacePanel(): void {
     if (!currentRoom.value?.workspace) return
-    if (showWorkspacePanel.value) closeWorkspacePanel()
-    else showWorkspacePanel.value = true
+    if (showWorkspacePanel.value && activeWorkspacePanel.value === 'files') {
+        closeWorkspacePanel()
+        return
+    }
+    activeWorkspacePanel.value = 'files'
+    showWorkspacePanel.value = true
+}
+
+function selectWorkspacePanel(panel: 'files' | 'browser'): void {
+    if (panel === 'browser') {
+        if (!desktopBrowserAvailable) return
+        if (toolPanelStore.workspaceDiff?.editable && filesStore.hasUnsavedChanges) {
+            message.warning(t('files.unsavedChanges'))
+            return
+        }
+        if (toolPanelStore.workspaceDiff?.editable && filesStore.editingFile) filesStore.closeEditor()
+        filesStore.closePreview()
+        toolPanelStore.closeWorkspaceDiff()
+    }
+    activeWorkspacePanel.value = panel
+    showWorkspacePanel.value = true
+}
+
+function handleOpenDesktopBrowserPanelRequest(): void {
+    selectWorkspacePanel('browser')
+}
+
+function handleBrowserAttachment(payload: { file: File }): void {
+    groupChatInputRef.value?.addFiles?.([payload.file])
 }
 
 function groupWorkspacePreviewPath(filePath: string): string | null {
@@ -302,7 +345,14 @@ function extractApiErrorMessage(err: any): string {
 async function handleCreateRoom(name: string, inviteCode: string, userName: string, description: string, compression: { triggerTokens: number; maxHistoryTokens: number; tailMessageCount: number }, workspace: string) {
     try {
         store.setUserInfo(userName, description)
-        const res = await store.createNewRoom(name, inviteCode, undefined, compression, workspace)
+        const res = await store.createNewRoom(
+            name,
+            inviteCode,
+            undefined,
+            compression,
+            workspace,
+            { name: userName, description },
+        )
         showCreateModal.value = false
         const failureMessage = formatAgentFailures(res.agentResults)
         if (failureMessage) message.warning(failureMessage)
@@ -444,6 +494,7 @@ async function handleAddAgent() {
 onMounted(() => {
     window.addEventListener('hermes:open-page-sidebar', openPageSidebar)
     window.addEventListener('hermes:preview-workspace-file', handleWorkspaceFilePreviewRequest)
+    window.addEventListener(OPEN_DESKTOP_BROWSER_PANEL_EVENT, handleOpenDesktopBrowserPanelRequest)
     window.addEventListener('resize', handleWorkspacePanelResize)
     handleWorkspacePanelResize()
     if (profilesStore.profiles.length === 0) {
@@ -454,6 +505,7 @@ onMounted(() => {
 onUnmounted(() => {
     window.removeEventListener('hermes:open-page-sidebar', openPageSidebar)
     window.removeEventListener('hermes:preview-workspace-file', handleWorkspaceFilePreviewRequest)
+    window.removeEventListener(OPEN_DESKTOP_BROWSER_PANEL_EVENT, handleOpenDesktopBrowserPanelRequest)
     window.removeEventListener('resize', handleWorkspacePanelResize)
     stopWorkspaceResize()
     if (showWorkspacePanel.value) closeWorkspacePanel()
@@ -465,11 +517,17 @@ watch(() => store.currentRoomId, (roomId, previousRoomId) => {
 })
 
 watch(() => filesStore.previewFile, previewFile => {
-    if (previewFile?.workspaceRoomId === store.currentRoomId) showWorkspacePanel.value = true
+    if (previewFile?.workspaceRoomId === store.currentRoomId) {
+        activeWorkspacePanel.value = 'files'
+        showWorkspacePanel.value = true
+    }
 })
 
 watch(() => toolPanelStore.workspaceDiff, workspaceDiff => {
-    if (workspaceDiff) showWorkspacePanel.value = true
+    if (workspaceDiff) {
+        activeWorkspacePanel.value = 'files'
+        showWorkspacePanel.value = true
+    }
 })
 
 watch(showWorkspacePanel, async visible => {
@@ -531,6 +589,28 @@ async function handleSaveWorkspace() {
 async function handleClearWorkspace() {
     workspaceValue.value = ''
     await handleSaveWorkspace()
+}
+
+function handleOpenUserProfile() {
+    const member = store.members.find(item => item.userId === store.userId)
+    userProfileName.value = member?.name || store.userName || ''
+    userProfileDescription.value = member?.description || ''
+    showUserProfileModal.value = true
+}
+
+async function handleSaveUserProfile() {
+    const name = userProfileName.value.trim()
+    if (!name || isSavingUserProfile.value) return
+    isSavingUserProfile.value = true
+    try {
+        await store.updateCurrentMemberProfile(name, userProfileDescription.value)
+        showUserProfileModal.value = false
+        message.success(t('common.saved'))
+    } catch {
+        message.error(t('common.saveFailed'))
+    } finally {
+        isSavingUserProfile.value = false
+    }
 }
 
 function handleOpenRoomSettings() {
@@ -767,6 +847,12 @@ async function handleApproval(choice: 'once' | 'session' | 'always' | 'deny') {
                             <ProfileAvatar class="agent-avatar" :name="store.userName || store.userId" :avatar="userMemberAvatar" :size="24" />
                         </span>
                     </div>
+                    <button v-if="hasRoom" class="icon-btn" :title="t('groupChat.yourName')" @click="handleOpenUserProfile">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 20h9" />
+                            <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z" />
+                        </svg>
+                    </button>
                     <button v-if="currentRoomCanManage" class="icon-btn" :title="t('groupChat.addAgent')" @click="handleAddAgent">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                     </button>
@@ -879,14 +965,49 @@ async function handleApproval(choice: 'once' | 'session' | 'always' | 'deny') {
                     <GroupChatInput ref="groupChatInputRef" @send="handleSendMessage" />
                 </div>
                 <aside
-                    v-if="showWorkspacePanel && (toolPanelStore.workspaceDiff || currentRoom?.workspace || filesStore.previewFile?.workspaceRoomId === store.currentRoomId)"
+                    v-if="showWorkspacePanel && (activeWorkspacePanel === 'browser' ? desktopBrowserAvailable : (toolPanelStore.workspaceDiff || currentRoom?.workspace || filesStore.previewFile?.workspaceRoomId === store.currentRoomId))"
                     class="group-workspace-panel"
                     :style="workspacePanelStyle"
                 >
                     <div class="group-workspace-resize-handle" @pointerdown="startWorkspaceResize" />
                     <div class="group-workspace-panel-inner">
+                        <div
+                            v-if="desktopBrowserAvailable && !toolPanelStore.workspaceDiff && !filesStore.previewFile"
+                            class="group-workspace-panel-tabs"
+                            role="tablist"
+                        >
+                            <button
+                                type="button"
+                                role="tab"
+                                :class="{ active: activeWorkspacePanel === 'files' }"
+                                :aria-selected="activeWorkspacePanel === 'files'"
+                                @click="selectWorkspacePanel('files')"
+                            >
+                                {{ t('drawer.files') }}
+                            </button>
+                            <button
+                                type="button"
+                                role="tab"
+                                :class="{ active: activeWorkspacePanel === 'browser' }"
+                                :aria-selected="activeWorkspacePanel === 'browser'"
+                                @click="selectWorkspacePanel('browser')"
+                            >
+                                {{ t('browser.title') }}
+                            </button>
+                            <button class="group-workspace-panel-close" type="button" :title="t('files.closePreview')" @click="closeWorkspacePanel">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="18" y1="6" x2="6" y2="18" />
+                                    <line x1="6" y1="6" x2="18" y2="18" />
+                                </svg>
+                            </button>
+                        </div>
+                        <DesktopBrowserPanel
+                            class="group-browser-panel"
+                            v-if="desktopBrowserAvailable && activeWorkspacePanel === 'browser'"
+                            @attach="handleBrowserAttachment"
+                        />
                         <WorkspaceDiffPreview
-                            v-if="toolPanelStore.workspaceDiff"
+                            v-else-if="toolPanelStore.workspaceDiff"
                             :custom-close="closeWorkspacePanel"
                         />
                         <FilePreview
@@ -894,7 +1015,7 @@ async function handleApproval(choice: 'once' | 'session' | 'always' | 'deny') {
                             :custom-close="closeWorkspacePanel"
                         />
                         <template v-else-if="currentRoom?.workspace">
-                            <div class="group-workspace-panel-header">
+                            <div v-if="!desktopBrowserAvailable" class="group-workspace-panel-header">
                                 <span>{{ t('drawer.files') }}</span>
                                 <button type="button" :title="t('files.closePreview')" @click="closeWorkspacePanel">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1018,6 +1139,45 @@ async function handleApproval(choice: 'once' | 'session' | 'always' | 'deny') {
                         <NButton @click="showWorkspaceModal = false">{{ t('common.cancel') }}</NButton>
                         <NButton @click="handleClearWorkspace">{{ t('workflow.workspace.clear') }}</NButton>
                         <NButton type="primary" @click="handleSaveWorkspace">{{ t('common.save') }}</NButton>
+                    </NSpace>
+                </template>
+            </NModal>
+            <NModal
+                v-model:show="showUserProfileModal"
+                preset="dialog"
+                :title="t('groupChat.yourName')"
+                style="width: 460px; max-width: 92vw"
+            >
+                <div class="form-group">
+                    <label class="form-label">{{ t('groupChat.yourName') }}</label>
+                    <NInput
+                        v-model:value="userProfileName"
+                        :placeholder="t('groupChat.yourNamePlaceholder')"
+                        :maxlength="120"
+                        @keyup.enter="handleSaveUserProfile"
+                    />
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ t('groupChat.yourDescription') }}</label>
+                    <NInput
+                        v-model:value="userProfileDescription"
+                        type="textarea"
+                        :rows="3"
+                        :maxlength="2000"
+                        :placeholder="t('groupChat.yourDescriptionPlaceholder')"
+                    />
+                </div>
+                <template #action>
+                    <NSpace justify="end">
+                        <NButton @click="showUserProfileModal = false">{{ t('common.cancel') }}</NButton>
+                        <NButton
+                            type="primary"
+                            :disabled="!userProfileName.trim()"
+                            :loading="isSavingUserProfile"
+                            @click="handleSaveUserProfile"
+                        >
+                            {{ t('common.save') }}
+                        </NButton>
                     </NSpace>
                 </template>
             </NModal>
@@ -1691,6 +1851,46 @@ export default defineComponent({ components: { CreateRoomForm } })
     min-width: 0;
     min-height: 0;
     overflow: hidden;
+}
+
+.group-workspace-panel-tabs {
+    height: 47px;
+    padding: 8px 12px;
+    border-bottom: 1px solid $border-color;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    box-sizing: border-box;
+
+    button {
+        height: 30px;
+        padding: 0 10px;
+        border: 0;
+        border-radius: $radius-sm;
+        color: $text-secondary;
+        background: transparent;
+        cursor: pointer;
+
+        &:hover,
+        &.active {
+            color: var(--accent-primary);
+            background: rgba(var(--accent-primary-rgb), 0.1);
+        }
+    }
+
+    .group-workspace-panel-close {
+        width: 30px;
+        padding: 0;
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+}
+
+.group-browser-panel {
+    flex: 1;
+    min-height: 0;
 }
 
 .group-workspace-panel-header {
