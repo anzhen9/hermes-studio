@@ -50,8 +50,11 @@ constexpr int kPinLcdClk = 21;
 constexpr int kPinLcdCs = 44;
 constexpr int kPinLcdDc = 43;
 constexpr int kPinLcdBl = 46;
-// Green status LED
-constexpr int kPinLed = 3;
+// Factory touch buttons. GPIO3 is also wired to the green LED, so touch input
+// takes precedence and this firmware does not drive the LED.
+constexpr int kPinTouchAction = 1;
+constexpr int kPinTouchVolumeDown = 2;
+constexpr int kPinTouchVolumeUp = 3;
 
 constexpr uint8_t kEs8311Addr = 0x18;
 constexpr int kLcdWidth = 240;
@@ -95,6 +98,13 @@ constexpr uint32_t kBootDebounceMs = 80;
 constexpr uint32_t kBootInputArmDelayMs = 2500;
 constexpr uint32_t kBootLongPressMs = 360;
 constexpr uint32_t kBootDoubleClickMs = 320;
+constexpr uint32_t kTouchDebounceMs = 80;
+constexpr uint32_t kTouchDoubleClickMs = 450;
+constexpr uint32_t kTouchInitialSilenceTimeoutMs = 4000;
+constexpr uint32_t kTouchSpeechEndSilenceMs = 1200;
+constexpr uint8_t kTouchVolumeStepPercent = 5;
+constexpr uint16_t kTouchActionSensitivityPermille = 35;
+constexpr uint16_t kTouchVolumeSensitivityPermille = 80;
 constexpr uint32_t kWifiDisconnectGraceMs = 8000;
 constexpr uint32_t kVoiceRecordMs = 4000;
 constexpr uint32_t kVoiceStreamRecordMs = 120000;
@@ -115,6 +125,11 @@ constexpr size_t kVoiceRecordBufferBytes = 44 + kVoiceRecordMaxFrames * sizeof(i
 constexpr int kVoiceOutputGainPermille = 820;
 constexpr int16_t kVoiceOutputLimit = 25500;
 constexpr uint8_t kEs8311DacVolume = 0xC8;
+constexpr uint8_t kEs8311DacMinimumAudibleVolume = 0xB0;
+constexpr uint16_t kVolumeFeedbackFrequencyHz = 1000;
+constexpr uint16_t kVolumeFeedbackDurationMs = 500;
+constexpr uint16_t kVolumeFeedbackFadeMs = 8;
+constexpr int16_t kVolumeFeedbackAmplitude = 9000;
 constexpr i2s_port_t kI2sPort = I2S_NUM_0;
 
 // --- Color palette (RGB565) ---
@@ -150,6 +165,7 @@ bool paEnabled = false;
 bool i2sReady = false;
 bool es8311Found = false;
 bool es8311Ready = false;
+bool touchButtonsReady = false;
 bool bootWasPressed = false;
 bool bootLongPressHandled = false;
 bool bootClickPending = false;
@@ -167,8 +183,6 @@ uint32_t bootClickPendingAtMs = 0;
 uint32_t bootReleaseStartedAtMs = 0;
 uint32_t audioInterruptPressStartedAtMs = 0;
 uint32_t wifiDisconnectedSinceMs = 0;
-uint32_t lastLedToggleAtMs = 0;
-bool ledOn = false;
 uint8_t lcdProgress = 0;
 String lcdTitle = "BOOT";
 String lcdHint = "starting";
@@ -188,6 +202,7 @@ String mcuToolPreview;
 String mcuToolStatus;
 String lastAudioDetail = "not started";
 uint32_t lastAudioAtMs = 0;
+uint8_t outputVolumePercent = 100;
 uint8_t mcuAdpcmInputBuffer[kMcuAdpcmReadChunkBytes];
 int16_t mcuAdpcmStereoBuffer[kMcuAdpcmOutputFrames * 2];
 int scannedNetworkCount = 0;
@@ -210,6 +225,25 @@ uint32_t voiceRecordRms = 0;
 uint32_t voiceRecordPeak = 0;
 uint32_t voiceRecordActiveSamples = 0;
 
+struct TouchButtonState {
+  uint8_t pin;
+  uint16_t sensitivityPermille;
+  uint32_t baseline = 0;
+  bool pressed = false;
+  bool longPressHandled = false;
+  bool clickPending = false;
+  uint32_t pressedAtMs = 0;
+  uint32_t lastReleasedAtMs = 0;
+  uint32_t clickPendingAtMs = 0;
+
+  TouchButtonState(uint8_t buttonPin, uint16_t buttonSensitivityPermille)
+      : pin(buttonPin), sensitivityPermille(buttonSensitivityPermille) {}
+};
+
+TouchButtonState touchActionButton{kPinTouchAction, kTouchActionSensitivityPermille};
+TouchButtonState touchVolumeDownButton{kPinTouchVolumeDown, kTouchVolumeSensitivityPermille};
+TouchButtonState touchVolumeUpButton{kPinTouchVolumeUp, kTouchVolumeSensitivityPermille};
+
 struct McuAudioSegment {
   String interactionId;
   String segmentId;
@@ -229,7 +263,10 @@ McuAudioSegment mcuCurrentAudio;
 uint8_t voiceWavBuffer[kVoiceRecordBufferBytes];
 
 void markMcuInteraction(const String &interactionId, const String &status, const String &text);
-void triggerBootVoiceTurn();
+void triggerBootVoiceTurn(bool touchTriggered = false);
+bool touchButtonPressed(TouchButtonState *button);
+void handleTouchVolumeButtons();
+void tickPlaybackUi();
 bool broadcastMcuInterrupt(const String &interactionId, const String &reason);
 void clearMcuAudioQueue();
 void finishMcuAudio(bool interrupted);
@@ -339,24 +376,6 @@ void setPowerAmp(bool enable) {
   // ESP-SparkBot has no power amp enable pin (GPIO_NC).
   // Keep the flag for logic compatibility with the C3 firmware.
   paEnabled = enable;
-}
-
-void setStatusLed(bool on) {
-  pinMode(kPinLed, OUTPUT);
-  digitalWrite(kPinLed, on ? HIGH : LOW);
-  ledOn = on;
-}
-
-void tickStatusLed() {
-  if (mcuInteractionActive || audioBusy || mcuAudioPlaying) {
-    uint32_t now = millis();
-    if (now - lastLedToggleAtMs > 200) {
-      lastLedToggleAtMs = now;
-      setStatusLed(!ledOn);
-    }
-  } else if (!ledOn) {
-    setStatusLed(true);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1477,6 +1496,71 @@ bool configureEs8311Codec() {
   return ok;
 }
 
+bool setOutputVolume(uint8_t volume) {
+  outputVolumePercent = volume > 100 ? 100 : volume;
+  uint16_t volumeRange = kEs8311DacVolume - kEs8311DacMinimumAudibleVolume;
+  uint8_t dacVolume = static_cast<uint8_t>(kEs8311DacMinimumAudibleVolume +
+      (volumeRange * outputVolumePercent + 50U) / 100U);
+  if (!es8311Ready) return false;
+  bool ok = es8311Write(0x32, dacVolume);
+  if (!ok) return false;
+  prefs.begin("mcu", false);
+  prefs.putUChar("volume", outputVolumePercent);
+  prefs.end();
+  return true;
+}
+
+void playVolumeFeedbackBeep() {
+  if (!i2sReady || !es8311Ready || audioBusy || mcuAudioPlaying) return;
+
+  constexpr size_t kFramesPerBuffer = 120;
+  constexpr float kTwoPi = 6.28318530718f;
+  int16_t stereo[kFramesPerBuffer * 2];
+  const uint32_t totalFrames = (kAudioSampleRate * kVolumeFeedbackDurationMs) / 1000UL;
+  const uint32_t fadeFrames = (kAudioSampleRate * kVolumeFeedbackFadeMs) / 1000UL;
+  uint32_t framesWritten = 0;
+
+  audioBusy = true;
+  es8311UpdateBits(0x31, 0x60, 0x00);
+  i2s_zero_dma_buffer(kI2sPort);
+  while (framesWritten < totalFrames) {
+    size_t frames = min<size_t>(kFramesPerBuffer, totalFrames - framesWritten);
+    for (size_t frame = 0; frame < frames; ++frame) {
+      uint32_t sampleIndex = framesWritten + frame;
+      float envelope = 1.0f;
+      if (sampleIndex < fadeFrames) {
+        envelope = static_cast<float>(sampleIndex) / fadeFrames;
+      } else if (sampleIndex >= totalFrames - fadeFrames) {
+        envelope = static_cast<float>(totalFrames - sampleIndex) / fadeFrames;
+      }
+      float phase = kTwoPi * kVolumeFeedbackFrequencyHz * sampleIndex / kAudioSampleRate;
+      int16_t sample = static_cast<int16_t>(sinf(phase) * kVolumeFeedbackAmplitude * envelope);
+      stereo[frame * 2] = sample;
+      stereo[frame * 2 + 1] = sample;
+    }
+    size_t written = 0;
+    if (i2s_write(kI2sPort, stereo, frames * 2 * sizeof(int16_t), &written,
+                  pdMS_TO_TICKS(1000)) != ESP_OK) {
+      lastAudioDetail = F("volume feedback beep failed");
+      break;
+    }
+    framesWritten += written / (2 * sizeof(int16_t));
+  }
+  i2s_zero_dma_buffer(kI2sPort);
+  audioBusy = false;
+}
+
+void adjustOutputVolume(int direction) {
+  int nextVolume = static_cast<int>(outputVolumePercent) + direction * kTouchVolumeStepPercent;
+  if (nextVolume < 0) nextVolume = 0;
+  if (nextVolume > 100) nextVolume = 100;
+  if (nextVolume == outputVolumePercent) return;
+  if (!setOutputVolume(static_cast<uint8_t>(nextVolume))) return;
+  setLcdStatus(LcdMode::Ready, F("VOLUME"), String(outputVolumePercent) + F("%"), 0);
+  playVolumeFeedbackBeep();
+  Serial.printf("Touch volume changed to %u%%\n", outputVolumePercent);
+}
+
 bool configureI2sBus() {
   i2s_driver_uninstall(kI2sPort);
   i2s_config_t config = {};
@@ -1529,7 +1613,7 @@ bool setI2sSampleRate(uint32_t sampleRate) {
 }
 
 int16_t shapeOutputSample(int16_t sample) {
-  int32_t value = (static_cast<int32_t>(sample) * kVoiceOutputGainPermille) / 1000;
+  int32_t value = (static_cast<int32_t>(sample) * kVoiceOutputGainPermille * outputVolumePercent) / 100000;
   if (value > kVoiceOutputLimit) value = kVoiceOutputLimit;
   if (value < -kVoiceOutputLimit) value = -kVoiceOutputLimit;
   return static_cast<int16_t>(value);
@@ -3148,6 +3232,8 @@ bool flushAdpcmStereo(int16_t *stereo, size_t *frames, uint32_t *playedBytes) {
   }
   *playedBytes += written;
   *frames = 0;
+  handleTouchVolumeButtons();
+  tickPlaybackUi();
   mcuSocketLoop();
   yield();
   return true;
@@ -3387,6 +3473,8 @@ bool playPcmStereoStream(WiFiClient *stream, int contentLength, uint32_t sampleR
       return false;
     }
     playedBytes += written;
+    handleTouchVolumeButtons();
+    tickPlaybackUi();
 
     pendingBytes = bufferedBytes - alignedBytes;
     if (pendingBytes > 0) memmove(buffer, buffer + alignedBytes, pendingBytes);
@@ -3495,6 +3583,8 @@ bool playPcmMonoStream(WiFiClient *stream, int contentLength, uint32_t sampleRat
       return false;
     }
     playedBytes += written;
+    handleTouchVolumeButtons();
+    tickPlaybackUi();
 
     pendingBytes = bufferedBytes - alignedBytes;
     if (pendingBytes > 0) memmove(input, input + alignedBytes, pendingBytes);
@@ -3568,6 +3658,8 @@ bool playRecordedWav(uint8_t *wav, size_t wavLen) {
     playedBytes += written;
     pcm += frames * 2;
     remaining -= frames * 2;
+    handleTouchVolumeButtons();
+    tickPlaybackUi();
     uint8_t progress = static_cast<uint8_t>(min<uint32_t>((playedBytes * 100UL) / (wavLen - 44), 100));
     setLcdStatus(LcdMode::Think, F("PLAY"), F("REC"), progress);
     yield();
@@ -4620,7 +4712,7 @@ bool broadcastMcuVoiceStreamChunk(const String &interactionId, const uint8_t *da
   return sent;
 }
 
-bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
+bool recordAndBroadcastMcuVoiceStream(const String &interactionId, bool touchTriggered) {
   if (audioBusy) {
     lastAudioDetail = F("audio busy before record");
     setLcdStatus(LcdMode::Think, F("BUSY"), F("AUDIO"), 50);
@@ -4709,7 +4801,9 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
       break;
     }
     if (framesDone > 0 && loopNow - startedAt > kBootDebounceMs) {
-      if (digitalRead(kPinBoot) != LOW) {
+      bool released = touchTriggered ? !touchButtonPressed(&touchActionButton)
+                                     : digitalRead(kPinBoot) != LOW;
+      if (released) {
         if (releaseStartedAt == 0) releaseStartedAt = loopNow;
         if (loopNow - releaseStartedAt >= kBootDebounceMs) {
           stopReason = "release";
@@ -4750,7 +4844,9 @@ bool recordAndBroadcastMcuVoiceStream(const String &interactionId) {
       uint16_t monoMag = sampleMagnitude(mono);
       if (monoMag > monoPeak) monoPeak = monoMag;
       monoSquares += static_cast<uint64_t>(monoMag) * static_cast<uint64_t>(monoMag);
-      if (monoMag >= kVoiceVadActiveThreshold) ++activeSamples;
+      if (monoMag >= kVoiceVadActiveThreshold) {
+        ++activeSamples;
+      }
       pcmChunk->samples[pcmChunkFrames++] = mono;
       ++framesDone;
 
@@ -4875,7 +4971,7 @@ void handleVoiceTurnResponse(const String &interactionId, const String &response
   broadcastMcuStatus();
 }
 
-void triggerBootVoiceTurn() {
+void triggerBootVoiceTurn(bool touchTriggered) {
   Serial.printf("Voice trigger wifi=%d status=%d activeUrl=%s token=%d profile=%s socket=%d audioBusy=%d playing=%d heap=%lu\n",
                 wifiReady ? 1 : 0, static_cast<int>(WiFi.status()), activeDeviceUrl.c_str(),
                 mcuAuthToken.length() > 0 ? 1 : 0, selectedProfile.c_str(), mcuSocketNamespaceReady ? 1 : 0,
@@ -4921,7 +5017,7 @@ void triggerBootVoiceTurn() {
   markMcuInteraction(interactionId, F("listening"), F(""));
   broadcastMcuStatus();
 
-  if (!recordAndBroadcastMcuVoiceStream(interactionId)) {
+  if (!recordAndBroadcastMcuVoiceStream(interactionId, touchTriggered)) {
     Serial.printf("Voice record failed detail=%s heap=%lu\n",
                   lastAudioDetail.c_str(), static_cast<unsigned long>(ESP.getFreeHeap()));
     markMcuInteraction(interactionId, F("failed"),
@@ -4959,6 +5055,119 @@ void triggerBootRecordPlaybackTest() {
   markMcuInteraction(interactionId, played ? F("completed") : F("failed"),
                      played ? String(F("")) : String(F("playback failed")));
   broadcastMcuStatus();
+}
+
+void initializeTouchButton(TouchButtonState *button) {
+  constexpr int kBaselineSamples = 16;
+  uint64_t total = 0;
+  for (int sample = 0; sample < kBaselineSamples; ++sample) {
+    total += touchRead(button->pin);
+    delay(5);
+  }
+  button->baseline = static_cast<uint32_t>(total / kBaselineSamples);
+  Serial.printf("Touch button gpio=%u baseline=%lu sensitivity=%u%%\n", button->pin,
+                static_cast<unsigned long>(button->baseline), button->sensitivityPermille / 10);
+}
+
+void initializeTouchButtons() {
+  touchSetCycles(0x1000, 0x1000);
+  initializeTouchButton(&touchActionButton);
+  initializeTouchButton(&touchVolumeDownButton);
+  initializeTouchButton(&touchVolumeUpButton);
+  touchButtonsReady = touchActionButton.baseline > 0 && touchVolumeDownButton.baseline > 0 &&
+                      touchVolumeUpButton.baseline > 0;
+  if (!touchButtonsReady) Serial.println(F("Touch buttons unavailable"));
+}
+
+bool touchButtonPressed(TouchButtonState *button) {
+  uint32_t value = touchRead(button->pin);
+  if (value == 0 || button->baseline == 0) return false;
+  uint32_t threshold = button->baseline + (button->baseline * button->sensitivityPermille) / 1000UL;
+  bool pressed = value >= threshold;
+  if (!pressed) button->baseline = (button->baseline * 15UL + value) / 16UL;
+  return pressed;
+}
+
+void handleTouchVolumeButtons() {
+  if (!touchButtonsReady) return;
+  uint32_t now = millis();
+  TouchButtonState *buttons[] = {&touchVolumeDownButton, &touchVolumeUpButton};
+  for (TouchButtonState *button : buttons) {
+    bool pressed = touchButtonPressed(button);
+    if (pressed && !button->pressed && now - button->lastReleasedAtMs >= kTouchDebounceMs) {
+      button->pressed = true;
+      if (button == &touchVolumeDownButton) {
+        adjustOutputVolume(-1);
+      } else {
+        adjustOutputVolume(1);
+      }
+    } else if (!pressed && button->pressed) {
+      button->pressed = false;
+      button->lastReleasedAtMs = now;
+    }
+  }
+}
+
+void tickPlaybackUi() {
+  refreshLcd();
+}
+
+void checkTouchFirmwareUpdate() {
+  if (audioBusy || mcuAudioPlaying) {
+    setLcdStatus(LcdMode::Think, F("OTA"), F("BUSY"), 0);
+    return;
+  }
+  setLcdStatus(LcdMode::Think, F("OTA"), F("CHECK"), 0);
+  String firmwareUrl;
+  String md5;
+  int size = 0;
+  McuOtaResult result = checkMcuFirmwareUpdate(true, false, &firmwareUrl, &md5, &size);
+  nextMcuOtaCheckAtMs = millis() + (result == McuOtaResult::Failed ? kMcuOtaRetryMs : kMcuOtaIntervalMs);
+  if (result == McuOtaResult::NoUpdate) {
+    setLcdStatus(LcdMode::Ready, F("OTA"), F("CURRENT"), 100);
+  } else if (result == McuOtaResult::UpdateAvailable) {
+    setLcdStatus(LcdMode::Think, F("OTA"), F("INSTALL"), 0);
+    if (!downloadAndApplyMcuFirmware(firmwareUrl, md5, size)) {
+      nextMcuOtaCheckAtMs = millis() + kMcuOtaRetryMs;
+      setLcdStatus(LcdMode::Error, F("OTA"), F("FAIL"), 0);
+    }
+  } else {
+    setLcdStatus(LcdMode::Error, F("OTA"), F("CHECK FAIL"), 0);
+  }
+}
+
+void handleTouchButtons() {
+  if (!touchButtonsReady) return;
+  uint32_t now = millis();
+  bool pressed = touchButtonPressed(&touchActionButton);
+  if (pressed && !touchActionButton.pressed &&
+      now - touchActionButton.lastReleasedAtMs >= kTouchDebounceMs) {
+    touchActionButton.pressed = true;
+    touchActionButton.longPressHandled = false;
+    touchActionButton.pressedAtMs = now;
+  } else if (pressed && !touchActionButton.longPressHandled &&
+             now - touchActionButton.pressedAtMs >= kBootLongPressMs) {
+    touchActionButton.longPressHandled = true;
+    touchActionButton.clickPending = false;
+    triggerBootVoiceTurn(true);
+  } else if (!pressed && touchActionButton.pressed) {
+    touchActionButton.pressed = false;
+    touchActionButton.lastReleasedAtMs = now;
+    if (touchActionButton.longPressHandled) {
+      touchActionButton.longPressHandled = false;
+    } else if (touchActionButton.clickPending &&
+        now - touchActionButton.clickPendingAtMs <= kTouchDoubleClickMs) {
+      touchActionButton.clickPending = false;
+      checkTouchFirmwareUpdate();
+    } else {
+      touchActionButton.clickPending = true;
+      touchActionButton.clickPendingAtMs = now;
+    }
+  }
+  if (touchActionButton.clickPending && now - touchActionButton.clickPendingAtMs > kTouchDoubleClickMs) {
+    touchActionButton.clickPending = false;
+  }
+  handleTouchVolumeButtons();
 }
 
 void handleBootButton() {
@@ -5620,18 +5829,20 @@ void setup() {
                 static_cast<unsigned long>(ESP.getFreeHeap()),
                 static_cast<unsigned long>(ESP.getMinFreeHeap()));
   esp_rom_printf("HStudio WiFi setup firmware boot (ESP32-S3 ESP-SparkBot)\n");
-  setStatusLed(true);
   Wire.begin(kPinI2cSda, kPinI2cScl);
   Wire.setClock(100000);
   initLcdDisplay();
   initAudioHardware();
   prefs.begin("mcu", true);
+  outputVolumePercent = prefs.getUChar("volume", 100);
   pendingProfileDeviceKey = prefs.getString("last_key", "");
   activeDeviceKey = prefs.getString("active_key", "");
   activeDeviceUrl = prefs.getString("active_url", "");
   mcuAuthToken = prefs.getString("auth_token", "");
   selectedProfile = prefs.getString("last_profile", "");
   prefs.end();
+  setOutputVolume(outputVolumePercent);
+  initializeTouchButtons();
   setLcdStatus(LcdMode::Boot, F("BOOT"), F("WIFI ONLY"), 15);
   if (kForceSetupAp) {
     startSetupAp();
@@ -5664,7 +5875,7 @@ void loop() {
   }
   refreshLcd();
   handleBootButton();
-  tickStatusLed();
+  handleTouchButtons();
   if (static_cast<int32_t>(millis() - nextMcuOtaCheckAtMs) >= 0) {
     McuOtaResult otaResult = checkMcuFirmwareUpdate(false);
     nextMcuOtaCheckAtMs = millis() + (otaResult == McuOtaResult::Failed ? kMcuOtaRetryMs : kMcuOtaIntervalMs);

@@ -18,7 +18,7 @@ playback flows are retained from the C3 base.
 - LCD: ST7789 240×240 RGB565, SPI3
   - MOSI GPIO47, CLK GPIO21, CS GPIO44, DC GPIO43, BL GPIO46
 - Boot button: GPIO0
-- Green LED: GPIO3
+- Touch buttons: GPIO1 (action), GPIO2 (volume down), GPIO3 (volume up)
 - Camera: OV2640 (not used in this firmware)
 - Power amp: not connected (no speaker on SparkBot)
 
@@ -74,6 +74,22 @@ begins.
    and the device restarts into normal Wi-Fi station mode.
 
 Use `/clear` from the device page to clear saved Wi-Fi and return to setup mode.
+
+## Touch Controls
+
+The factory SparkBot touch mapping uses GPIO1, GPIO2, and GPIO3. Tap GPIO2 to
+decrease output volume by 5%, or GPIO3 to increase it by 5%. Hold GPIO1 for at
+least 360 ms to start listening, then release it to send the captured voice
+stream for transcription. Double-tap GPIO1 within 450 ms to check whether a
+firmware update is available; when one is found, the firmware downloads,
+verifies, installs it, and restarts automatically.
+
+The ES8311 volume range is calibrated so lower percentages remain audible. Each
+volume adjustment plays a short fade-in/fade-out beep when the audio path is
+idle, making the selected level immediately audible.
+
+GPIO3 is shared by the right touch button and the green status LED. Touch
+controls take precedence, so this firmware does not drive the green LED.
 
 ## LAN Device Discovery
 
