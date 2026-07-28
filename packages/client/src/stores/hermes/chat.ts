@@ -55,6 +55,8 @@ export interface Attachment {
   size: number
   url: string
   file?: File
+  /** Structured context sent to the model but rendered collapsed in the UI. */
+  context?: string
 }
 
 export interface Message {
@@ -411,6 +413,14 @@ interface CompressionState {
   error?: string
 }
 
+interface AbortState {
+  aborting: boolean
+  synced: boolean | null
+  timedOut?: boolean
+  message?: string
+  error?: string
+}
+
 function uid(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
@@ -450,6 +460,7 @@ export function attachWorkspaceChangesToExactTurns(
   const fallback: WorkspaceRunChangeSummary[] = []
   for (const change of changes) {
     const assistantMessageId = String(change.assistant_message_id || '').trim()
+    if (!assistantMessageId) continue
     const target = assistantMessageId ? assistantById.get(assistantMessageId) : undefined
     if (target) target.workspaceChanges!.push(change)
     else fallback.push(change)
@@ -515,10 +526,11 @@ async function uploadFiles(attachments: Attachment[]): Promise<{ name: string; p
   return data.files
 }
 
-async function buildContentBlocks(
+export async function buildContentBlocks(
   content: string,
   attachments?: Attachment[],
-  uploadedFiles?: { name: string; path: string }[]
+  uploadedFiles?: { name: string; path: string }[],
+  includeContextText = true,
 ): Promise<ContentBlock[]> {
   const blocks: ContentBlock[] = []
 
@@ -540,6 +552,7 @@ async function buildContentBlocks(
           name: uploaded.name,
           path: uploaded.path,
           media_type: attachment.type,
+          ...(attachment.context?.trim() ? { context: attachment.context.trim() } : {}),
         })
       } else {
         // Other files
@@ -548,6 +561,13 @@ async function buildContentBlocks(
           name: uploaded.name,
           path: uploaded.path,
           media_type: attachment?.type,
+          ...(attachment?.context?.trim() ? { context: attachment.context.trim() } : {}),
+        })
+      }
+      if (includeContextText && attachment?.context?.trim()) {
+        blocks.push({
+          type: 'text',
+          text: `<browser_selection_context format="json">\n${attachment.context.trim()}\n</browser_selection_context>`,
         })
       }
     }
@@ -1088,8 +1108,27 @@ export const useChatStore = defineStore('chat', () => {
   })
   const isLoadingSessions = ref(false)
   const sessionsLoaded = ref(false)
-  const isLoadingMessages = ref(false)
+  const messageLoadRequests = ref<Map<string, number>>(new Map())
+  const isLoadingMessages = computed(() => {
+    const sid = activeSessionId.value
+    return sid ? messageLoadRequests.value.has(sid) : false
+  })
   const isRunActive = computed(() => isStreaming.value)
+  let loadSessionsRequestSequence = 0
+  let switchSessionRequestSequence = 0
+
+  function beginMessageLoad(sessionId: string, requestSequence: number) {
+    const next = new Map(messageLoadRequests.value)
+    next.set(sessionId, requestSequence)
+    messageLoadRequests.value = next
+  }
+
+  function endMessageLoad(sessionId: string, requestSequence: number) {
+    if (messageLoadRequests.value.get(sessionId) !== requestSequence) return
+    const next = new Map(messageLoadRequests.value)
+    next.delete(sessionId)
+    messageLoadRequests.value = next
+  }
 
   async function fetchRuntimeSessions(profile?: string | null): Promise<SessionSummary[]> {
     const scopedProfile = profile || undefined
@@ -1124,6 +1163,7 @@ export const useChatStore = defineStore('chat', () => {
     serverWorking.value = new Set()
     pendingForkCommands.value = new Set()
     workspaceRunChangesBySession.value = new Map()
+    abortStates.value = new Map()
     sessionsLoaded.value = false
     clearActiveSession()
   }
@@ -1144,18 +1184,26 @@ export const useChatStore = defineStore('chat', () => {
     compressionStates.value = next
   }
 
-  const abortState = ref<{
-    aborting: boolean
-    synced: boolean | null
-    timedOut?: boolean
-    message?: string
-    error?: string
-  } | null>(null)
-  const isAborting = computed(() => abortState.value?.aborting === true)
+  // Abort state is scoped per session because background sockets remain active
+  // while another conversation is selected.
+  const abortStates = ref<Map<string, AbortState>>(new Map())
 
-  function setAbortState(state: typeof abortState.value) {
-    abortState.value = state
+  function setAbortState(sessionId: string | null | undefined, state: AbortState | null) {
+    if (!sessionId) return
+    const next = new Map(abortStates.value)
+    if (state) next.set(sessionId, state)
+    else next.delete(sessionId)
+    abortStates.value = next
   }
+
+  const abortState = computed<AbortState | null>({
+    get: () => {
+      const sid = activeSessionId.value
+      return sid ? abortStates.value.get(sid) || null : null
+    },
+    set: state => setAbortState(activeSessionId.value, state),
+  })
+  const isAborting = computed(() => abortState.value?.aborting === true)
 
   const activeSession = ref<Session | null>(null)
   const messages = computed<Message[]>(() => activeSession.value?.messages || [])
@@ -1213,7 +1261,7 @@ export const useChatStore = defineStore('chat', () => {
     activeSessionId.value = null
     activeSession.value = null
     focusMessageId.value = null
-    setAbortState(null)
+    setAbortState(sid, null)
     setCompressionState(sid, null)
     removeItem(storageKey())
   }
@@ -1230,7 +1278,8 @@ export const useChatStore = defineStore('chat', () => {
     target.messages = target.messages.filter(message => !message.id.startsWith(WORKSPACE_RUN_CHANGE_MESSAGE_PREFIX))
     for (const message of target.messages) {
       if (message.role === 'tool' && message.toolCallId) {
-        message.toolChange = changes?.get(message.toolCallId)
+        const change = changes?.get(message.toolCallId)
+        message.toolChange = String(change?.assistant_message_id || '').trim() ? change : undefined
       }
     }
     if (!changes) {
@@ -1238,8 +1287,8 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
     const runChanges = [...changes.values()].filter(change => change?.source === 'run')
-    const legacyChanges = attachWorkspaceChangesToExactTurns(target.messages, runChanges)
-    insertWorkspaceRunChangeMessages(target, legacyChanges, existingById)
+    const unresolvedAttributedChanges = attachWorkspaceChangesToExactTurns(target.messages, runChanges)
+    insertWorkspaceRunChangeMessages(target, unresolvedAttributedChanges, existingById)
   }
 
   function workspaceRunChangeMessageId(changeId: string): string {
@@ -1379,9 +1428,11 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function loadSessions(profile?: string | null, preferredSessionId?: string | null) {
+    const requestSequence = ++loadSessionsRequestSequence
     isLoadingSessions.value = true
     try {
       const list = await fetchRuntimeSessions(profile)
+      if (requestSequence !== loadSessionsRequestSequence) return
       let fresh = list.map(mapHermesSession)
       // Preserve already-loaded messages for sessions that are still present,
       // so we don't blow away the active session's messages on refresh.
@@ -1427,10 +1478,14 @@ export const useChatStore = defineStore('chat', () => {
         clearActiveSession()
       }
     } catch (err) {
-      console.error('Failed to load sessions:', err)
+      if (requestSequence === loadSessionsRequestSequence) {
+        console.error('Failed to load sessions:', err)
+      }
     } finally {
-      isLoadingSessions.value = false
-      sessionsLoaded.value = true
+      if (requestSequence === loadSessionsRequestSequence) {
+        isLoadingSessions.value = false
+        sessionsLoaded.value = true
+      }
     }
   }
 
@@ -1617,6 +1672,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function switchSession(sessionId: string, focusId?: string | null) {
+    const requestSequence = ++switchSessionRequestSequence
     clearThinkingObservationFor(sessionId)
     activeSessionId.value = sessionId
     focusMessageId.value = focusId ?? null
@@ -1628,7 +1684,7 @@ export const useChatStore = defineStore('chat', () => {
 
     if (!activeSession.value) return
 
-    isLoadingMessages.value = true
+    beginMessageLoad(sessionId, requestSequence)
     let backgroundPendingOnResume = 0
 
     try {
@@ -1637,7 +1693,11 @@ export const useChatStore = defineStore('chat', () => {
         const timeout = setTimeout(() => reject(new Error('resume timeout')), 15_000)
         resumeSession(sessionId, (data) => {
           clearTimeout(timeout)
-          if (data.session_id !== sessionId || activeSessionId.value !== sessionId) {
+          if (
+            data.session_id !== sessionId
+            || activeSessionId.value !== sessionId
+            || requestSequence !== switchSessionRequestSequence
+          ) {
             resolve()
             return
           }
@@ -1663,9 +1723,9 @@ export const useChatStore = defineStore('chat', () => {
             replaceQueuedUserMessages(sessionId, [])
           }
           if ((data as any).isAborting) {
-            setAbortState({ aborting: true, synced: null })
+            setAbortState(sessionId, { aborting: true, synced: null })
           } else if (!data.isWorking) {
-            setAbortState(null)
+            setAbortState(sessionId, null)
           }
           if (!data.isWorking) setCompressionState(sessionId, null)
           if (data.inputTokens != null) target.inputTokens = data.inputTokens
@@ -1720,11 +1780,11 @@ export const useChatStore = defineStore('chat', () => {
                 })
                 if (e.contextTokens != null) target.contextTokens = e.contextTokens
               } else if (e.event === 'abort.started') {
-                setAbortState({ aborting: true, synced: null })
+                setAbortState(sessionId, { aborting: true, synced: null })
               } else if (e.event === 'abort.timeout') {
-                setAbortState({ aborting: true, synced: false, timedOut: true, message: (e as any).message })
+                setAbortState(sessionId, { aborting: true, synced: false, timedOut: true, message: (e as any).message })
               } else if (e.event === 'abort.completed') {
-                setAbortState({ aborting: false, synced: e.synced ?? false })
+                setAbortState(sessionId, { aborting: false, synced: e.synced ?? false })
                 settleInterruptedSubagents(sessionId)
               } else if (e.event === 'approval.requested') {
                 setPendingApproval({ ...e, session_id: sessionId } as RunEvent)
@@ -1819,17 +1879,17 @@ export const useChatStore = defineStore('chat', () => {
           resolve()
         }, activeSession.value?.profile, runtimeTransport())
       })
-      if (activeSessionId.value === sessionId) {
+      if (activeSessionId.value === sessionId && requestSequence === switchSessionRequestSequence) {
         await loadWorkspaceRunChangesForSession(sessionId)
       }
     } catch (err) {
       console.error('Failed to load session messages via resume:', err)
     } finally {
-      isLoadingMessages.value = false
+      endMessageLoad(sessionId, requestSequence)
     }
 
     // Resume in-flight run event listeners if needed
-    if (activeSessionId.value === sessionId) {
+    if (activeSessionId.value === sessionId && requestSequence === switchSessionRequestSequence) {
       resumeServerWorkingRun(sessionId, backgroundPendingOnResume > 0, !serverWorking.value.has(sessionId))
     }
   }
@@ -1944,6 +2004,7 @@ export const useChatStore = defineStore('chat', () => {
     if (!ok) return false
     sessions.value = sessions.value.filter(s => s.id !== sessionId)
     clearMessageReference(sessionId)
+    setAbortState(sessionId, null)
     if (activeSessionId.value === sessionId) {
       if (sessions.value.length > 0) {
         await switchSession(sessions.value[0].id)
@@ -1961,6 +2022,7 @@ export const useChatStore = defineStore('chat', () => {
     if (!ok) return false
     sessions.value = sessions.value.filter(s => s.id !== sessionId)
     clearMessageReference(sessionId)
+    setAbortState(sessionId, null)
     if (completedUnreadSessions.value.has(sessionId)) {
       const next = new Set(completedUnreadSessions.value)
       next.delete(sessionId)
@@ -2318,7 +2380,7 @@ export const useChatStore = defineStore('chat', () => {
       queueLengths.value.delete(sid)
       queuedUserMessages.value.delete(sid)
       clearMessageReference(sid)
-      setAbortState(null)
+      setAbortState(sid, null)
       const msgs = getSessionMsgs(sid)
       msgs.forEach(m => {
         if (m.isStreaming) updateMessage(sid, m.id, { isStreaming: false })
@@ -2841,6 +2903,7 @@ export const useChatStore = defineStore('chat', () => {
 
       // Build input in Anthropic format
       let input: string | ContentBlock[]
+      let displayInput: string | ContentBlock[] | undefined
       if (attachments && attachments.length > 0) {
         // Has attachments: upload first, then build content blocks
         const uploaded = await uploadFiles(attachments)
@@ -2868,6 +2931,9 @@ export const useChatStore = defineStore('chat', () => {
 
         // Build content blocks with uploaded file paths
         input = await buildContentBlocks(submittedContent, attachments, uploaded)
+        if (attachments.some(attachment => attachment.context?.trim())) {
+          displayInput = await buildContentBlocks(submittedContent, attachments, uploaded, false)
+        }
       } else {
         // No attachments: use plain text format
         input = submittedContent
@@ -2910,6 +2976,7 @@ export const useChatStore = defineStore('chat', () => {
         : undefined
       const runPayload: StartRunRequest = {
         input,
+        ...(displayInput ? { display_input: displayInput } : {}),
         instructions: activeSession.value?.instructions,
         session_id: sid,
         profile: sessionProfile,
@@ -3002,9 +3069,9 @@ export const useChatStore = defineStore('chat', () => {
         }
 
         if (data.isAborting) {
-          setAbortState({ aborting: true, synced: null })
+          setAbortState(sid, { aborting: true, synced: null })
         } else if (!data.isWorking) {
-          setAbortState(null)
+          setAbortState(sid, null)
         }
         if (!data.isWorking) setCompressionState(sid, null)
 
@@ -3083,13 +3150,13 @@ export const useChatStore = defineStore('chat', () => {
                 break
               }
               case 'abort.started':
-                setAbortState({ aborting: true, synced: null })
+                setAbortState(sid, { aborting: true, synced: null })
                 break
               case 'abort.timeout':
-                setAbortState({ aborting: true, synced: false, timedOut: true, message: (e as any).message })
+                setAbortState(sid, { aborting: true, synced: false, timedOut: true, message: (e as any).message })
                 break
               case 'abort.completed':
-                setAbortState({ aborting: false, synced: (e as any).synced ?? false })
+                setAbortState(sid, { aborting: false, synced: (e as any).synced ?? false })
                 settleInterruptedSubagents(sid)
                 break
               case 'approval.requested':
@@ -3136,7 +3203,7 @@ export const useChatStore = defineStore('chat', () => {
               clearSessionCompletedUnread(sid)
               serverWorking.value.add(sid)
               clearAgentEventMessages(sid)
-              setAbortState(null)
+              setAbortState(sid, null)
               setCompressionState(sid, null)
               runProducedAssistantText = false
               runProducedAssistantContent = false
@@ -3211,22 +3278,22 @@ export const useChatStore = defineStore('chat', () => {
             }
 
             case 'abort.started': {
-              setAbortState({ aborting: true, synced: null })
+              setAbortState(sid, { aborting: true, synced: null })
               break
             }
 
             case 'abort.timeout': {
-              setAbortState({ aborting: true, synced: false, timedOut: true, message: (evt as any).message })
+              setAbortState(sid, { aborting: true, synced: false, timedOut: true, message: (evt as any).message })
               break
             }
 
             case 'abort.completed': {
-              setAbortState({ aborting: false, synced: (evt as any).synced ?? false })
+              setAbortState(sid, { aborting: false, synced: (evt as any).synced ?? false })
               settleInterruptedSubagents(sid)
               clearPendingInteractions(sid)
               if ((evt as any).queue_length > 0) {
                 queueLengths.value.set(sid, (evt as any).queue_length)
-                setAbortState(null)
+                setAbortState(sid, null)
                 break
               }
               const msgs = getSessionMsgs(sid)
@@ -3240,7 +3307,7 @@ export const useChatStore = defineStore('chat', () => {
                 }
               })
               cleanup()
-              setAbortState(null)
+              setAbortState(sid, null)
               break
             }
 
@@ -3831,7 +3898,7 @@ export const useChatStore = defineStore('chat', () => {
           serverWorking.value.add(sid)
           ensureAbortHandle()
           clearAgentEventMessages(sid)
-          setAbortState(null)
+          setAbortState(sid, null)
           setCompressionState(sid, null)
           runProducedAssistantText = false
           runProducedAssistantContent = false
@@ -3880,22 +3947,22 @@ export const useChatStore = defineStore('chat', () => {
         }
 
         case 'abort.started': {
-          setAbortState({ aborting: true, synced: null })
+          setAbortState(sid, { aborting: true, synced: null })
           break
         }
 
         case 'abort.timeout': {
-          setAbortState({ aborting: true, synced: false, timedOut: true, message: (evt as any).message })
+          setAbortState(sid, { aborting: true, synced: false, timedOut: true, message: (evt as any).message })
           break
         }
 
         case 'abort.completed': {
-          setAbortState({ aborting: false, synced: (evt as any).synced ?? false })
+          setAbortState(sid, { aborting: false, synced: (evt as any).synced ?? false })
           settleInterruptedSubagents(sid)
           clearPendingInteractions(sid)
           if ((evt as any).queue_length > 0) {
             queueLengths.value.set(sid, (evt as any).queue_length)
-            setAbortState(null)
+            setAbortState(sid, null)
             break
           }
           const msgs = getSessionMsgs(sid)
@@ -3909,7 +3976,7 @@ export const useChatStore = defineStore('chat', () => {
             }
           })
           cleanup()
-          setAbortState(null)
+          setAbortState(sid, null)
           break
         }
 
@@ -4428,7 +4495,7 @@ export const useChatStore = defineStore('chat', () => {
     clearPendingInteractions(sid)
     const ctrl = streamStates.value.get(sid)
     if (ctrl) {
-      setAbortState({ aborting: true, synced: null })
+      setAbortState(sid, { aborting: true, synced: null })
       ctrl.abort()
       const msgs = getSessionMsgs(sid)
       const lastMsg = msgs[msgs.length - 1]
@@ -4438,7 +4505,7 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
     if (serverWorking.value.has(sid)) {
-      setAbortState({ aborting: true, synced: null })
+      setAbortState(sid, { aborting: true, synced: null })
       getChatRunSocket(runtimeTransport())?.emit('abort', { session_id: sid })
       const msgs = getSessionMsgs(sid)
       const lastMsg = msgs[msgs.length - 1]
@@ -4467,9 +4534,9 @@ export const useChatStore = defineStore('chat', () => {
               serverWorking.value.delete(sid)
             }
             if (data.isAborting) {
-              setAbortState({ aborting: true, synced: null })
+              setAbortState(sid, { aborting: true, synced: null })
             } else if (!data.isWorking) {
-              setAbortState(null)
+              setAbortState(sid, null)
             }
             if (!data.isWorking) setCompressionState(sid, null)
             if (data.messages?.length && activeSession.value) {

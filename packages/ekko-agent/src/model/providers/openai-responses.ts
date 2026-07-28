@@ -37,7 +37,10 @@ interface OpenAIResponsesPayload {
 type OpenAIResponseInputItem =
   | {
       role: 'user' | 'assistant' | 'developer'
-      content: string
+      content: string | Array<
+        | { type: 'input_text'; text: string }
+        | { type: 'input_image'; image_url: string }
+      >
     }
   | {
       type: 'function_call'
@@ -82,7 +85,7 @@ interface OpenAIResponsesResponse {
 const capabilities: ModelCapabilities = {
   streaming: true,
   tools: true,
-  vision: false,
+  vision: true,
   jsonMode: true,
   systemPrompt: true,
 }
@@ -261,11 +264,22 @@ function normalizeReasoning(response: OpenAIResponsesResponse): string | undefin
 function toOpenAIResponseInput(message: AgentMessage): OpenAIResponseInputItem[] {
   if (message.role === 'tool') {
     if (!message.toolCallId) return []
-    return [{
+    const items: OpenAIResponseInputItem[] = [{
       type: 'function_call_output',
       call_id: message.toolCallId,
       output: message.content,
     }]
+    const images = message.contentParts?.filter(part => part.type === 'image') ?? []
+    if (images.length) {
+      items.push({
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'Visual output from the preceding tool result:' },
+          ...images.map(image => ({ type: 'input_image' as const, image_url: `data:${image.mimeType};base64,${image.data}` })),
+        ],
+      })
+    }
+    return items
   }
   if (message.role === 'assistant') {
     const items: OpenAIResponseInputItem[] = []
@@ -279,6 +293,16 @@ function toOpenAIResponseInput(message: AgentMessage): OpenAIResponseInputItem[]
       })
     }
     return items
+  }
+  const images = message.contentParts?.filter(part => part.type === 'image') ?? []
+  if (images.length) {
+    return [{
+      role: 'user',
+      content: [
+        ...(message.content ? [{ type: 'input_text' as const, text: message.content }] : []),
+        ...images.map(image => ({ type: 'input_image' as const, image_url: `data:${image.mimeType};base64,${image.data}` })),
+      ],
+    }]
   }
   return [{ role: 'user', content: message.content }]
 }

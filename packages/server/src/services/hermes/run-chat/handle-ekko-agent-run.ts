@@ -1,5 +1,6 @@
 import type { Server, Socket } from 'socket.io'
 import { createHash, randomUUID } from 'crypto'
+import { join } from 'node:path'
 import { inspect } from 'util'
 import {
   createModelClient,
@@ -17,12 +18,13 @@ import { getGlobalEkkoAgent } from '../../ekko-agent/manager'
 import { resolveEkkoMcpServers } from '../../ekko-agent/mcp'
 import { resolveEkkoAuthorizedProviderCredentials } from '../../ekko-agent/auth-providers'
 import { createSession, addMessage, getSession, updateSession, updateSessionStats } from '../../../db/hermes/session-store'
+import type { ChatMessage } from '../../../lib/context-compressor'
 import { logger } from '../../logger'
 import { recordSessionUsage } from '../../usage-recorder'
 import { getProfileDir } from '../hermes-profile'
 import { observeRunChatPetEvent } from '../pet-state-socket'
-import { contentBlocksToString, extractTextForPreview } from './content-blocks'
-import { getOrCreateSession } from './compression'
+import { contentBlocksToString, convertContentBlocksForAgent, extractTextForPreview } from './content-blocks'
+import { buildCompressedHistory, getOrCreateSession } from './compression'
 import { resolveBridgeRunModelConfig, type RunModelGroup } from './model-config'
 import { estimateUsageTokensFromMessages } from './usage'
 import type { ChatCodingAgentId, ContentBlock, SessionState } from './types'
@@ -108,17 +110,85 @@ function normalizeStoredToolCalls(value: unknown): AgentToolCall[] | undefined {
   return calls.length ? calls : undefined
 }
 
-function toAgentMessages(messages: SessionState['messages']): AgentMessage[] {
+function parseStoredContentBlocks(value: unknown): ContentBlock[] | null {
+  let parsed = value
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed.startsWith('[')) return null
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      return null
+    }
+  }
+  if (!Array.isArray(parsed)) return null
+  const valid = parsed.every((block) => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return false
+    const candidate = block as Record<string, unknown>
+    if (candidate.type === 'text') return typeof candidate.text === 'string'
+    if (candidate.type === 'image') {
+      return typeof candidate.name === 'string' &&
+        typeof candidate.path === 'string' &&
+        typeof candidate.media_type === 'string'
+    }
+    if (candidate.type === 'file') {
+      return typeof candidate.name === 'string' && typeof candidate.path === 'string'
+    }
+    return false
+  })
+  return valid ? parsed as ContentBlock[] : null
+}
+
+function imagePartFromDataUri(dataUri: string): NonNullable<AgentMessage['contentParts']>[number] | null {
+  const match = /^data:(image\/[^;,]+);base64,([\s\S]+)$/i.exec(dataUri)
+  if (!match) return null
+  return {
+    type: 'image',
+    mimeType: match[1].toLowerCase(),
+    data: match[2],
+  }
+}
+
+async function toUserAgentContent(value: unknown): Promise<Pick<AgentMessage, 'content' | 'contentParts'>> {
+  const blocks = parseStoredContentBlocks(value)
+  if (!blocks) {
+    return { content: contentBlocksToString(value as string | ContentBlock[]) }
+  }
+
+  const converted = await convertContentBlocksForAgent(blocks)
+  const text: string[] = []
+  const contentParts: NonNullable<AgentMessage['contentParts']> = []
+  for (const part of converted) {
+    if (part.type === 'text' && typeof part.text === 'string') {
+      text.push(part.text)
+      continue
+    }
+    if (part.type === 'image_url' && typeof part.image_url?.url === 'string') {
+      const imagePart = imagePartFromDataUri(part.image_url.url)
+      if (imagePart) contentParts.push(imagePart)
+    }
+  }
+  return {
+    content: text.join('\n'),
+    contentParts: contentParts.length ? contentParts : undefined,
+  }
+}
+
+async function toAgentMessages(messages: Array<ChatMessage | SessionState['messages'][number]>): Promise<AgentMessage[]> {
   const toolCallIds = new Set<string>()
   const result: AgentMessage[] = []
 
   for (const message of messages) {
     if (message.role === 'user' || message.role === 'command' || message.role === 'system') {
-      const content = contentBlocksToString(message.content as any)
+      const normalized = message.role === 'system'
+        ? { content: contentBlocksToString(message.content as any) }
+        : await toUserAgentContent(message.content)
+      const content = normalized.content
       if (content.trim()) {
         result.push({
           role: message.role === 'system' ? 'system' : 'user',
           content,
+          contentParts: normalized.contentParts,
         })
       }
       continue
@@ -135,7 +205,7 @@ function toAgentMessages(messages: SessionState['messages']): AgentMessage[] {
       const agentMessage: AgentMessage = {
         role: 'assistant',
         content: contentBlocksToString(message.content as any),
-        reasoning: message.reasoning || message.reasoning_content || undefined,
+        reasoning: ('reasoning' in message ? message.reasoning : undefined) || message.reasoning_content || undefined,
         toolCalls,
       }
       if (agentMessage.content.trim() || (agentMessage.reasoning?.trim().length ?? 0) > 0 || toolCalls?.length) {
@@ -153,7 +223,9 @@ function toAgentMessages(messages: SessionState['messages']): AgentMessage[] {
         role: 'tool',
         content,
         toolCallId,
-        name: message.tool_name || undefined,
+        name: ('tool_name' in message ? message.tool_name : undefined) ||
+          ('name' in message ? message.name : undefined) ||
+          undefined,
       })
       toolCallIds.delete(toolCallId)
     }
@@ -203,6 +275,21 @@ function consolePayload(value: unknown): string {
     breakLength: 120,
     compact: false,
   })
+}
+
+function modelRequestDebugInfo(request: ModelRequest): ModelRequest {
+  return {
+    ...request,
+    messages: request.messages.map(message => ({
+      ...message,
+      contentParts: message.contentParts?.map(part => part.type === 'image'
+        ? {
+            ...part,
+            data: `[base64 omitted length=${part.data.length}]`,
+          }
+        : part),
+    })),
+  }
 }
 
 function errorPayload(err: unknown): unknown {
@@ -275,7 +362,7 @@ function createConsoleModelClient(
       console.log('[ekko-agent] model request', consolePayload({
         session_id: context.sessionId,
         provider_config: redactProviderConfig(context.providerConfig),
-        request: providerRequest,
+        request: modelRequestDebugInfo(providerRequest),
       }))
       try {
         const response = await client.create(providerRequest)
@@ -300,7 +387,7 @@ function createConsoleModelClient(
             from_request_style: context.providerConfig.requestStyle,
             to_request_style: context.fallback.providerConfig.requestStyle,
             provider_config: redactProviderConfig(context.fallback.providerConfig),
-            request: fallbackRequest,
+            request: modelRequestDebugInfo(fallbackRequest),
           }))
           try {
             const response = await context.fallback.client.create(fallbackRequest)
@@ -328,7 +415,7 @@ function createConsoleModelClient(
       console.log('[ekko-agent] model stream request', consolePayload({
         session_id: context.sessionId,
         provider_config: redactProviderConfig(context.providerConfig),
-        request: providerRequest,
+        request: modelRequestDebugInfo(providerRequest),
       }))
       try {
         for await (const event of client.stream(providerRequest)) {
@@ -353,7 +440,7 @@ function createConsoleModelClient(
             from_request_style: context.providerConfig.requestStyle,
             to_request_style: context.fallback.providerConfig.requestStyle,
             provider_config: redactProviderConfig(context.fallback.providerConfig),
-            request: fallbackRequest,
+            request: modelRequestDebugInfo(fallbackRequest),
           }))
           try {
             for await (const event of context.fallback.client.stream(fallbackRequest)) {
@@ -420,6 +507,8 @@ export async function handleEkkoAgentRun(
     preferRequested: true,
   })
   const workspace = data.workspace || storedSession?.workspace || getProfileDir(profile)
+  const shouldEmitWorkspaceUpdate = Boolean(workspace && !storedSession?.workspace)
+  if (storedSession && !storedSession.workspace) updateSession(sessionId, { workspace })
   const displayInput = data.display_input === undefined ? data.input : data.display_input
   const inputText = contentBlocksToString(data.input)
   const displayText = displayInput == null ? '' : contentBlocksToString(displayInput)
@@ -451,6 +540,12 @@ export async function handleEkkoAgentRun(
       title,
       workspace,
       category_id: data.category_id,
+    })
+  }
+  if (shouldEmitWorkspaceUpdate) {
+    emit('session.workspace.updated', {
+      event: 'session.workspace.updated',
+      workspace,
     })
   }
   try {
@@ -520,8 +615,11 @@ export async function handleEkkoAgentRun(
         }
       : undefined,
   })
-  const agent = getGlobalEkkoAgent()
+  const agent = getGlobalEkkoAgent(join(getProfileDir(profile), 'skills'))
   const memoryUsageBatchId = randomUUID()
+  const currentInputTokens = estimateUsageTokensFromMessages([
+    { role: 'user', content: inputText },
+  ]).inputTokens
 
   let assistantText = ''
   let assistantReasoning = ''
@@ -632,13 +730,67 @@ export async function handleEkkoAgentRun(
   try {
     logger.info('[chat-run-socket] starting ekko-agent run for session %s', sessionId)
     const authenticatedUserId = socket.data?.user?.id == null ? undefined : String(socket.data.user.id)
+    const toolContext = {
+      cwd: workspace,
+      workspaceRoot: workspace,
+      workspaceId: workspace,
+      userId: authenticatedUserId,
+      sessionId,
+      profileId: profile,
+      browserSessionId: sessionId,
+      mcpServers,
+      timeoutMs: 120_000,
+      signal: abortController.signal,
+    }
+    const metadata = {
+      session_id: sessionId,
+      workspace_id: workspace,
+      user_id: authenticatedUserId,
+      profile,
+    }
+    let fixedContextEstimate: Promise<number> | undefined
+    const compressedHistory = await buildCompressedHistory(
+      sessionId,
+      profile,
+      baseUrl,
+      apiKey,
+      emit,
+      sessionMap,
+      {
+        model: modelConfig.model,
+        provider: modelConfig.provider,
+        allowHermesFallback: false,
+      },
+      async (_messages, localMessageTokens) => {
+        fixedContextEstimate ||= agent.estimateContext({
+          modelClient,
+          model: modelConfig.model,
+          modelDefaults: { model: modelConfig.model },
+          messages: [],
+          signal: abortController.signal,
+          memoryEnabled: false,
+          toolContext,
+          metadata,
+        }).then(estimate => estimate.contextTokens)
+        return (await fixedContextEstimate) + localMessageTokens
+      },
+      currentInputTokens,
+      shouldPersistUserMessage && data.display_role !== 'command',
+    )
+    const currentMessage: AgentMessage = {
+      role: 'user',
+      ...await toUserAgentContent(data.input),
+    }
     const result = await agent.run({
       modelClient,
       model: modelConfig.model,
       modelDefaults: {
         model: modelConfig.model,
       },
-      messages: toAgentMessages(state.messages),
+      messages: [
+        ...await toAgentMessages(compressedHistory),
+        currentMessage,
+      ],
       signal: abortController.signal,
       onEvent: handleRuntimeEvent,
       onMemoryUsage: event => {
@@ -657,24 +809,8 @@ export async function handleEkkoAgentRun(
           isEstimated: false,
         })
       },
-      toolContext: {
-        cwd: workspace,
-        workspaceRoot: workspace,
-        workspaceId: workspace,
-        userId: authenticatedUserId,
-        sessionId,
-        profileId: profile,
-        browserSessionId: sessionId,
-        mcpServers,
-        timeoutMs: 120_000,
-        signal: abortController.signal,
-      },
-      metadata: {
-        session_id: sessionId,
-        workspace_id: workspace,
-        user_id: authenticatedUserId,
-        profile,
-      },
+      toolContext,
+      metadata,
     })
     assistantText = result.output.content || assistantText
     const outputUsage = result.output.usage

@@ -55,10 +55,19 @@ import { isStoredSuperAdmin } from "@/api/client";
 import { useDefaultWorkspace } from "@/composables/useDefaultWorkspace";
 import { canScopedCodingAgentUseProvider, usesServerManagedProviderAuth } from "@/utils/codingAgentProviders";
 import { OPEN_SUBAGENT_STREAM_EVENT, type OpenSubagentStreamDetail } from "@/utils/hermes/subagent-stream";
+import { desktopBridge, hasDesktopBrowserBridge } from "@/utils/desktop-bridge";
+import { OPEN_DESKTOP_BROWSER_PANEL_EVENT } from "@/utils/desktop-browser";
+
+const props = withDefaults(defineProps<{
+  standalone?: boolean;
+}>(), {
+  standalone: false,
+});
 
 const FilesPanel = defineAsyncComponent(async () => (await import('./FilesPanel.vue')).default);
 const FilePreview = defineAsyncComponent(async () => (await import('@/components/hermes/files/FilePreview.vue')).default);
 const WorkspaceDiffPreview = defineAsyncComponent(async () => (await import('@/components/hermes/files/WorkspaceDiffPreview.vue')).default);
+const DesktopBrowserPanel = defineAsyncComponent(async () => (await import('./DesktopBrowserPanel.vue')).default);
 
 const chatStore = useChatStore();
 const appStore = useAppStore();
@@ -74,14 +83,20 @@ const isSuperAdmin = computed(() => isStoredSuperAdmin());
 const showOutline = ref(false);
 const showRealtimeVoice = ref(false);
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null);
-const chatInputRef = ref<(InstanceType<typeof ChatInput> & { addFiles?: (files: File[]) => void }) | null>(null);
+const chatInputRef = ref<(InstanceType<typeof ChatInput> & {
+  addFiles?: (files: File[]) => void;
+  addBrowserAttachment?: (file: File, context: string) => void;
+}) | null>(null);
 const chatContentWrapperRef = ref<HTMLElement | null>(null);
 const chatMainContentRef = ref<HTMLElement | null>(null);
 let sessionFadeAnimation: Animation | null = null;
 const chatDropCounter = ref(0);
 const isChatDropActive = ref(false);
 const showToolPanel = ref(false);
-const activeToolPanel = ref<"files" | "terminal">("files");
+const activeToolPanel = ref<"files" | "terminal" | "browser">("files");
+const desktopBrowserAvailable = hasDesktopBrowserBridge();
+const desktopChatWindowAvailable = desktopBridge()?.isDesktop === true
+  && typeof desktopBridge()?.openChatWindow === "function";
 const selectedSubagent = ref<OpenSubagentStreamDetail | null>(null);
 const selectedSubagentStream = computed(() => {
   const selected = selectedSubagent.value;
@@ -111,8 +126,13 @@ const isBatchDeleting = ref(false);
 // where the session list covers the chat content ("auto-fixes after a
 // moment" — that was the race).
 const showSessions = ref(
-  typeof window === "undefined" ||
-    !window.matchMedia("(max-width: 768px)").matches,
+  !props.standalone && (
+    typeof window === "undefined" ||
+    !window.matchMedia("(max-width: 768px)").matches
+  )
+);
+const pageSidebarExpanded = computed(
+  () => !props.standalone && currentMode.value === "chat" && showSessions.value,
 );
 let mobileQuery: MediaQueryList | null = null;
 const isMobile = ref(false);
@@ -138,6 +158,11 @@ function sessionHref(sessionId: string) {
 
 function openSessionInNewTab(sessionId: string) {
   if (typeof window === "undefined") return;
+  const bridge = desktopBridge();
+  if (bridge?.isDesktop && bridge.openChatWindow) {
+    void bridge.openChatWindow(sessionId, sessionProfile(sessionId) || undefined);
+    return;
+  }
   window.open(sessionHref(sessionId), "_blank", "noopener,noreferrer");
 }
 
@@ -268,6 +293,10 @@ function handleWorkspaceFileAttach(file: File) {
   chatInputRef.value?.addFiles?.([file]);
 }
 
+function handleBrowserAttachment(payload: { file: File; context: string }) {
+  chatInputRef.value?.addBrowserAttachment?.(payload.file, payload.context);
+}
+
 async function handleSessionClick(sessionId: string) {
   chatStore.clearSessionCompletedUnread(sessionId);
   await router.push({
@@ -290,6 +319,12 @@ function handleMobileChange(e: MediaQueryListEvent | MediaQueryList) {
 function openPageSidebar() {
   showSessions.value = true;
 }
+
+watch(
+  pageSidebarExpanded,
+  (expanded) => appStore.setPageSidebarExpanded(expanded),
+  { immediate: true },
+);
 
 function workspacePreviewPath(filePath: string): string | null {
   const workspace = activeWorkspacePath.value?.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -341,19 +376,34 @@ function handleOpenSubagentStreamRequest(event: Event) {
   showToolPanel.value = true;
 }
 
+function handleOpenDesktopBrowserPanelRequest() {
+  if (!desktopBrowserAvailable) return;
+  if (toolPanelStore.workspaceDiff && filesStore.hasUnsavedChanges) {
+    message.warning(t("files.unsavedChanges"));
+    return;
+  }
+  if (toolPanelStore.workspaceDiff && filesStore.editingFile) filesStore.closeEditor();
+  filesStore.closePreview();
+  toolPanelStore.closeWorkspaceDiff();
+  selectedSubagent.value = null;
+  activeToolPanel.value = "browser";
+  showToolPanel.value = true;
+}
+
 onMounted(() => {
   mobileQuery = window.matchMedia("(max-width: 768px)");
   handleMobileChange(mobileQuery);
   mobileQuery.addEventListener("change", handleMobileChange);
   window.addEventListener("hermes:open-page-sidebar", openPageSidebar);
   window.addEventListener("hermes:preview-workspace-file", handleWorkspaceFilePreviewRequest);
+  window.addEventListener(OPEN_DESKTOP_BROWSER_PANEL_EVENT, handleOpenDesktopBrowserPanelRequest);
   window.addEventListener(OPEN_SUBAGENT_STREAM_EVENT, handleOpenSubagentStreamRequest);
   window.addEventListener("resize", handleToolPanelViewportResize);
   handleToolPanelViewportResize();
   if (profilesStore.profiles.length === 0) {
     void profilesStore.fetchProfiles();
   }
-  void loadSessionCategories();
+  if (!props.standalone) void loadSessionCategories();
 });
 
 watch(
@@ -388,6 +438,7 @@ onUnmounted(() => {
   mobileQuery?.removeEventListener("change", handleMobileChange);
   window.removeEventListener("hermes:open-page-sidebar", openPageSidebar);
   window.removeEventListener("hermes:preview-workspace-file", handleWorkspaceFilePreviewRequest);
+  window.removeEventListener(OPEN_DESKTOP_BROWSER_PANEL_EVENT, handleOpenDesktopBrowserPanelRequest);
   window.removeEventListener(OPEN_SUBAGENT_STREAM_EVENT, handleOpenSubagentStreamRequest);
   window.removeEventListener("resize", handleToolPanelViewportResize);
   stopToolResize();
@@ -732,16 +783,12 @@ const hiddenDefaultWorkspaces = computed(() => {
   return defaultWorkspaces.value.filter(ws => !visible.has(ws));
 });
 
-const showEkkoAgentEntry = import.meta.env.DEV;
-const newChatAgentOptions = computed(() => {
-  const options = [
-    { label: "Hermes", value: "hermes" },
-    { label: "Claude Code", value: "claude-code" },
-    { label: "Codex", value: "codex" },
-  ];
-  if (showEkkoAgentEntry) options.push({ label: "Ekko Agent", value: "ekko-agent" });
-  return options;
-});
+const newChatAgentOptions = computed(() => [
+  { label: "Hermes", value: "hermes" },
+  { label: "Claude Code", value: "claude-code" },
+  { label: "Codex", value: "codex" },
+  { label: "Ekko Agent", value: "ekko-agent" },
+]);
 
 const newChatApiModeOptions = computed(() => [
   { label: t("codingAgents.protocolOpenAiChat"), value: "chat_completions" },
@@ -1338,7 +1385,12 @@ const contextMenuOptions = computed(() => {
       },
     ],
   })
-  options.push({ label: t("chat.openSessionInNewTab"), key: "open-link" })
+  options.push({
+    label: t(desktopChatWindowAvailable
+      ? "chat.openSessionInNewWindow"
+      : "chat.openSessionInNewTab"),
+    key: "open-link",
+  })
   options.push({ label: t("chat.copySessionLink"), key: "copy-link" })
   options.push({ label: t("chat.copySessionId"), key: "copy-id" })
   return options
@@ -1750,15 +1802,15 @@ async function handleSessionModelCustomSubmit() {
 </script>
 
 <template>
-  <div class="chat-panel">
+  <div class="chat-panel" :class="{ 'chat-panel--standalone': standalone }">
     <div
-      v-if="currentMode === 'chat'"
+      v-if="currentMode === 'chat' && !standalone"
       class="session-backdrop"
       :class="{ active: showSessions }"
       @click="showSessions = false"
     />
     <aside
-      v-if="currentMode === 'chat'"
+      v-if="currentMode === 'chat' && !standalone"
       class="session-list"
       :class="{ collapsed: !showSessions }"
     >
@@ -1916,7 +1968,9 @@ async function handleSessionModelCustomSubmit() {
             :selected="isSessionSelected(s)"
             :show-profile="true"
             :to="sessionHref(s.id)"
+            :intercept-modified-navigation="desktopChatWindowAvailable"
             @select="handleSessionClick(s.id)"
+            @open-new="openSessionInNewTab(s.id)"
             @contextmenu="handleContextMenu($event, s.id)"
             @delete="handleDeleteSession(s.id)"
             @toggle-select="toggleSessionSelection(s)"
@@ -1961,7 +2015,9 @@ async function handleSessionModelCustomSubmit() {
               :selected="isSessionSelected(s)"
               :show-profile="true"
               :to="sessionHref(s.id)"
+              :intercept-modified-navigation="desktopChatWindowAvailable"
               @select="handleSessionClick(s.id)"
+              @open-new="openSessionInNewTab(s.id)"
               @contextmenu="handleContextMenu($event, s.id)"
               @delete="handleDeleteSession(s.id)"
               @toggle-select="toggleSessionSelection(s)"
@@ -2454,7 +2510,7 @@ async function handleSessionModelCustomSubmit() {
       class="chat-main"
       :class="{ 'chat-main--sidebar-collapsed': currentMode !== 'chat' || !showSessions }"
     >
-      <header class="chat-header">
+      <header v-if="!standalone" class="chat-header">
         <div class="header-left">
           <NButton
             v-if="currentMode === 'chat'"
@@ -2528,7 +2584,7 @@ async function handleSessionModelCustomSubmit() {
                   </template>
                 </NButton>
               </template>
-              {{ t("drawer.files") }} / {{ t("drawer.terminal") }}
+              {{ desktopBrowserAvailable ? `${t("drawer.files")} / ${t("drawer.terminal")} / ${t("browser.title")}` : `${t("drawer.files")} / ${t("drawer.terminal")}` }}
             </NTooltip>
             <NTooltip trigger="hover">
               <template #trigger>
@@ -2657,6 +2713,17 @@ async function handleSessionModelCustomSubmit() {
                   >
                     {{ t("drawer.terminal") }}
                   </button>
+                  <button
+                    v-if="desktopBrowserAvailable"
+                    class="chat-tool-tab"
+                    :class="{ active: activeToolPanel === 'browser' }"
+                    type="button"
+                    role="tab"
+                    :aria-selected="activeToolPanel === 'browser'"
+                    @click="activeToolPanel = 'browser'"
+                  >
+                    {{ t("browser.title") }}
+                  </button>
                 </div>
                 <div class="chat-tool-content">
                   <FilesPanel
@@ -2668,6 +2735,10 @@ async function handleSessionModelCustomSubmit() {
                   <TerminalPanel
                     v-show="activeToolPanel === 'terminal'"
                     :visible="showToolPanel && activeToolPanel === 'terminal'"
+                  />
+                  <DesktopBrowserPanel
+                    v-if="desktopBrowserAvailable && activeToolPanel === 'browser'"
+                    @attach="handleBrowserAttachment"
                   />
                 </div>
               </template>
