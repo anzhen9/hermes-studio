@@ -3,7 +3,7 @@
   "info": {
     "title": "Hermes Studio API",
     "description": "Hermes Studio API — chat sessions, scheduled jobs, platform channels, model management, skills, memory, logs, file browser, group chat, and terminal.",
-    "version": "0.6.33"
+    "version": "0.6.35"
   },
   "servers": [
     {
@@ -159,6 +159,10 @@
     {
       "name": "Coding Agents",
       "description": "Coding agent installation, config, and runs"
+    },
+    {
+      "name": "Theme",
+      "description": "Per-user appearance settings and background image"
     },
     {
       "name": "API Docs",
@@ -7450,6 +7454,22 @@
             }
           },
           {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "event",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "level",
             "in": "query",
             "required": false,
@@ -7466,6 +7486,14 @@
             }
           },
           {
+            "name": "run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "session",
             "in": "query",
             "required": false,
@@ -7475,6 +7503,14 @@
           },
           {
             "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "text",
             "in": "query",
             "required": false,
             "schema": {
@@ -13008,6 +13044,139 @@
           },
           "404": {
             "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/theme": {
+      "get": {
+        "tags": [
+          "Theme"
+        ],
+        "summary": "Get theme",
+        "description": "GET /api/theme",
+        "operationId": "getTheme",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Theme"
+        ],
+        "summary": "Update theme",
+        "description": "PUT /api/theme",
+        "operationId": "updateTheme",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/theme/background": {
+      "post": {
+        "tags": [
+          "Theme"
+        ],
+        "summary": "Create background",
+        "description": "POST /api/theme/background",
+        "operationId": "uploadThemeBackground",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Theme"
+        ],
+        "summary": "Get background",
+        "description": "GET /api/theme/background",
+        "operationId": "getThemeBackground",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Theme"
+        ],
+        "summary": "Delete background",
+        "description": "DELETE /api/theme/background",
+        "operationId": "deleteThemeBackground",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           }
         }
       }
