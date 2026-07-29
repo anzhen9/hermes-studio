@@ -132,6 +132,29 @@ describe('MCU firmware controller', () => {
     })
   })
 
+  it('serves a version-isolated sparkbot v2 manifest', async () => {
+    tempRoot = await makeTempRoot()
+    process.chdir(tempRoot)
+    vi.stubEnv('NODE_ENV', 'production')
+
+    const firmware = Buffer.from('sparkbot-v2')
+    await writeFile(path.join(tempRoot, 'dist/mcu/sparkbot/v2/firmware.bin'), firmware)
+    const ctrl = await import('../../packages/server/src/controllers/hermes/mcu-firmware')
+    const ctx = makeCtx({ version: 'v2' })
+
+    await ctrl.sparkbotManifest(ctx)
+
+    expect(ctx.status).toBe(200)
+    expect(ctx.body).toMatchObject({
+      updateAvailable: true,
+      target: 'hstudio-esp32-sparkbot',
+      firmwareVersion: 'v2',
+      size: firmware.length,
+      md5: createHash('md5').update(firmware).digest('hex'),
+      url: '/api/hermes/mcu/sparkbot/firmware/v2/firmware.bin',
+    })
+  })
+
   it('keeps the unversioned sparkbot manifest pinned to v1 for already-shipped devices', async () => {
     tempRoot = await makeTempRoot()
     process.chdir(tempRoot)
@@ -159,7 +182,7 @@ describe('MCU firmware controller', () => {
     vi.stubEnv('NODE_ENV', 'production')
 
     const ctrl = await import('../../packages/server/src/controllers/hermes/mcu-firmware')
-    const ctx = makeCtx({ version: 'v2' })
+    const ctx = makeCtx({ version: 'v3' })
 
     await ctrl.sparkbotManifest(ctx)
 
@@ -176,6 +199,7 @@ async function makeTempRoot(): Promise<string> {
   await mkdir(path.join(root, 'dist/mcu/v1'), { recursive: true })
   await mkdir(path.join(root, 'dist/mcu/v2'), { recursive: true })
   await mkdir(path.join(root, 'dist/mcu/sparkbot/v1'), { recursive: true })
+  await mkdir(path.join(root, 'dist/mcu/sparkbot/v2'), { recursive: true })
   return root
 }
 

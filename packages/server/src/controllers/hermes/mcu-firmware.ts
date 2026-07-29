@@ -29,7 +29,7 @@ interface TargetConfig {
 const DEFAULT_FIRMWARE_VERSION: FirmwareVersion = 'v1'
 const SUPPORTED_VERSIONS: Record<FirmwareTarget, Set<string>> = {
   c3: new Set<string>(['v1', 'v2'] satisfies FirmwareVersion[]),
-  sparkbot: new Set<string>([DEFAULT_FIRMWARE_VERSION]),
+  sparkbot: new Set<string>(['v1', 'v2'] satisfies FirmwareVersion[]),
 }
 
 const TARGETS: Record<FirmwareTarget, TargetConfig> = {
@@ -53,9 +53,11 @@ const TARGETS: Record<FirmwareTarget, TargetConfig> = {
     versionedRoute: (version) => `/api/hermes/mcu/sparkbot/firmware/${version}/firmware.bin`,
     distPathByVersion: {
       v1: resolve(process.cwd(), 'dist', 'mcu', 'sparkbot', 'v1', 'firmware.bin'),
+      v2: resolve(process.cwd(), 'dist', 'mcu', 'sparkbot', 'v2', 'firmware.bin'),
     },
     devPathByVersion: {
       v1: resolve(process.cwd(), 'packages/esp32-sparkbot/v1/.pio/build/esp32-s3-devkitc-1/firmware.bin'),
+      v2: resolve(process.cwd(), 'packages/esp32-sparkbot/v2/build/hstudio_sparkbot.bin'),
     },
     legacyDistFallback: resolve(process.cwd(), 'dist', 'mcu', 'sparkbot-firmware.bin'),
   },

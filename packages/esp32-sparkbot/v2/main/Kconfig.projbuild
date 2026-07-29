@@ -1,0 +1,19 @@
+menu "Hermes SparkBot"
+
+config HERMES_WAKE_WORD_DISPLAY
+    string "Wake word shown to users"
+    default "嘿，小方"
+
+config HERMES_WAKE_WORD_COMMAND
+    string "ESP-SR custom command for the wake word model"
+    default "hei xiao fang"
+    help
+        This value must be present in the MultiNet command model packed with the
+        firmware. Changing only the displayed text does not retrain a model.
+
+config HERMES_WAKE_WORD_THRESHOLD
+    int "Wake word recognition threshold (percent)"
+    range 1 100
+    default 75
+
+endmenu
