@@ -52,3 +52,7 @@ CLAUDE.md
 # Client source map artifacts
 packages/client/src/**/*.js
 .hermes/
+build/
+managed_components/
+sdkconfig.old
+sdkconfig
