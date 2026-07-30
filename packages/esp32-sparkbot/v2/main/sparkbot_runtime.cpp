@@ -12,6 +12,7 @@
 #include <memory>
 #include <vector>
 #include "driver/i2s.h"
+#include "esp_log.h"
 #include "esp_system.h"
 #include "esp_rom_sys.h"
 #include "mbedtls/base64.h"
@@ -74,7 +75,9 @@ constexpr uint32_t kLcdSuccessReturnDelayMs = 2500;
 constexpr uint32_t kLcdErrorReturnDelayMs = 6000;
 constexpr uint32_t kActivePetRefreshIntervalMs = 30000;
 constexpr uint32_t kActivePetRetryMs = 10000;
-constexpr uint32_t kActivePetStateIntervalMs = 3000;
+constexpr uint32_t kActivePetStateIntervalMs = 10000;
+constexpr uint32_t kActivePetHttpTimeoutMs = 800;
+constexpr uint32_t kActivePetSpriteTimeoutMs = 30000;
 constexpr uint32_t kProvisionRestartDelayMs = 2500;
 constexpr uint32_t kProvisionRedirectDelayMs = 6500;
 constexpr int kMaxScannedNetworks = 20;
@@ -90,13 +93,14 @@ constexpr uint32_t kMcuSocketReconnectMs = 3000;
 constexpr int kMaxProfiles = 8;
 constexpr int kMaxMcuAudioQueue = 4;
 constexpr uint32_t kMcuInteractionIdleDelayMs = 3500;
-constexpr uint32_t kMcuFailureIdleDelayMs = 20000;
+constexpr uint32_t kMcuFailureIdleDelayMs = 4000;
+constexpr uint32_t kVoiceSocketReadyTimeoutMs = 600;
 constexpr uint32_t kMcuAudioDefaultDurationMs = 1800;
 constexpr uint32_t kMcuAudioMaxDurationMs = 9000;
 constexpr uint32_t kMcuAudioHttpTimeoutMs = 30000;
 constexpr uint32_t kMcuAudioTailSilenceMs = 120;
-constexpr uint32_t kMcuAudioDrainMinMs = 180;
-constexpr uint32_t kMcuAudioDrainMaxMs = 650;
+constexpr uint32_t kMcuAudioDrainMinMs = 40;
+constexpr uint32_t kMcuAudioDrainMaxMs = 100;
 constexpr size_t kMcuAdpcmHeaderBytes = 20;
 constexpr size_t kMcuAdpcmReadChunkBytes = 256;
 constexpr size_t kMcuAdpcmOutputFrames = 256;
@@ -229,6 +233,10 @@ srmodel_list_t *wakeWordModels = nullptr;
 esp_mn_iface_t *wakeWordRecognizer = nullptr;
 model_iface_data_t *wakeWordRecognizerData = nullptr;
 std::vector<int16_t> wakeWordSamples;
+uint32_t wakeWordSampleRate = 0;
+uint32_t wakeWordResamplePhase = 0;
+uint32_t wakeWordLastDiagnosticAtMs = 0;
+uint32_t wakeWordDetectedChunks = 0;
 uint32_t mcuInteractionUpdatedAtMs = 0;
 uint32_t mcuAudioStartedAtMs = 0;
 uint32_t mcuAudioDurationMs = 0;
@@ -277,6 +285,7 @@ uint8_t voiceWavBuffer[kVoiceRecordBufferBytes];
 void markMcuInteraction(const String &interactionId, const String &status, const String &text);
 void triggerBootVoiceTurn(bool touchTriggered = false);
 bool touchButtonPressed(TouchButtonState *button);
+void handleTouchButtons();
 void handleTouchVolumeButtons();
 void tickPlaybackUi();
 bool broadcastMcuInterrupt(const String &interactionId, const String &reason);
@@ -347,6 +356,8 @@ LanDevice lanDevices[kMaxLanDevices];
 int lanDeviceCount = 0;
 ActivePetDisplay activePetDisplay;
 bool petChangePending = false;
+bool petSwitching = false;
+uint32_t nextPetSwitchAttemptAtMs = 0;
 
 enum class LcdMode : uint8_t {
   Boot,
@@ -612,6 +623,72 @@ void lcdDrawCenteredText(int y, const String &text, uint8_t scale, uint16_t colo
   lcdDrawText(max(0, x), y, text, scale, color);
 }
 
+void lcdDrawDiagonal(int x1, int y1, int x2, int y2, uint16_t color) {
+  int dx = abs(x2 - x1);
+  int sx = x1 < x2 ? 1 : -1;
+  int dy = -abs(y2 - y1);
+  int sy = y1 < y2 ? 1 : -1;
+  int error = dx + dy;
+  while (true) {
+    lcdSetPixel(x1, y1, color);
+    if (x1 == x2 && y1 == y2) return;
+    int twiceError = error * 2;
+    if (twiceError >= dy) {
+      error += dy;
+      x1 += sx;
+    }
+    if (twiceError <= dx) {
+      error += dx;
+      y1 += sy;
+    }
+  }
+}
+
+void lcdDrawPetSwitchingLabel() {
+  constexpr int kGlyphWidth = 16;
+  constexpr int kGap = 3;
+  constexpr int kDotsWidth = 3 * 4 + 2 * 4;
+  int width = kGlyphWidth * 3 + kGap * 3 + kDotsWidth;
+  int x = (kLcdWidth - width) / 2;
+  constexpr int y = 198;
+
+  // 切: 七 + 刀
+  lcdDrawHLine(x + 1, y + 2, 8, kColorFg);
+  lcdDrawDiagonal(x + 8, y + 3, x + 3, y + 9, kColorFg);
+  lcdDrawHLine(x + 1, y + 10, 8, kColorFg);
+  lcdDrawVLine(x + 11, y + 2, 10, kColorFg);
+  lcdDrawHLine(x + 11, y + 2, 4, kColorFg);
+  lcdDrawDiagonal(x + 14, y + 8, x + 11, y + 14, kColorFg);
+
+  x += kGlyphWidth + kGap;
+
+  // 换: 扌 + 奂
+  lcdDrawHLine(x + 1, y + 4, 6, kColorFg);
+  lcdDrawVLine(x + 4, y + 1, 13, kColorFg);
+  lcdDrawDiagonal(x + 4, y + 8, x + 1, y + 12, kColorFg);
+  lcdDrawHLine(x + 8, y + 3, 7, kColorFg);
+  lcdDrawDiagonal(x + 9, y + 4, x + 12, y + 7, kColorFg);
+  lcdDrawDiagonal(x + 14, y + 4, x + 11, y + 7, kColorFg);
+  lcdDrawHLine(x + 8, y + 8, 7, kColorFg);
+  lcdDrawVLine(x + 11, y + 8, 4, kColorFg);
+  lcdDrawDiagonal(x + 11, y + 10, x + 8, y + 14, kColorFg);
+  lcdDrawDiagonal(x + 11, y + 10, x + 15, y + 14, kColorFg);
+
+  x += kGlyphWidth + kGap;
+
+  // 中
+  lcdDrawHLine(x + 2, y + 3, 12, kColorFg);
+  lcdDrawHLine(x + 2, y + 11, 12, kColorFg);
+  lcdDrawVLine(x + 2, y + 3, 9, kColorFg);
+  lcdDrawVLine(x + 13, y + 3, 9, kColorFg);
+  lcdDrawVLine(x + 8, y + 1, 14, kColorFg);
+
+  x += kGlyphWidth + kGap;
+  for (uint8_t i = 0; i < 3; ++i) {
+    lcdDrawBox(x + i * 8, y + 12, 4, 4, kColorFg);
+  }
+}
+
 void lcdDrawScrollingText(int y, String text, uint8_t scale, uint16_t color) {
   text.trim();
   text.toUpperCase();
@@ -759,17 +836,22 @@ void drawActivePetFrame() {
 
   lcdDrawBox(kActivePetRegionX, kActivePetRegionY, kActivePetRegionWidth, kActivePetRegionHeight, kColorBg);
 
-  if (activePetDisplay.spritePixels && activePetDisplay.frameWidth > 0 && activePetDisplay.frameHeight > 0) {
-    uint32_t loopMs = max<uint32_t>(activePetDisplay.loopMs, 1);
-    uint8_t frameCount = max<uint8_t>(activePetDisplay.frameCount, 1);
-    uint8_t frameIndex = static_cast<uint8_t>((millis() % loopMs) / max<uint32_t>(1, loopMs / frameCount));
-    if (frameIndex >= frameCount) frameIndex = frameCount - 1;
-    int x = kActivePetRegionX + (kActivePetRegionWidth - activePetDisplay.frameWidth) / 2;
-    int y = kActivePetRegionY + (kActivePetRegionHeight - activePetDisplay.frameHeight) / 2;
-    blitRgb565SpriteFrame(x, y, activePetDisplay.spritePixels, activePetDisplay.frameWidth,
-                          activePetDisplay.frameHeight, activePetDisplay.spriteStripWidth, frameIndex,
-                          activePetDisplay.stateRowIndex);
+  if (!activePetDisplay.spritePixels || activePetDisplay.frameWidth == 0 || activePetDisplay.frameHeight == 0) {
+    bool blink = (millis() % 4300UL) > 4100UL;
+    drawEye(40, 60, blink, true, false);
+    drawEye(144, 60, blink, true, false);
+    return;
   }
+
+  uint32_t loopMs = max<uint32_t>(activePetDisplay.loopMs, 1);
+  uint8_t frameCount = max<uint8_t>(activePetDisplay.frameCount, 1);
+  uint8_t frameIndex = static_cast<uint8_t>((millis() % loopMs) / max<uint32_t>(1, loopMs / frameCount));
+  if (frameIndex >= frameCount) frameIndex = frameCount - 1;
+  int x = kActivePetRegionX + (kActivePetRegionWidth - activePetDisplay.frameWidth) / 2;
+  int y = kActivePetRegionY + (kActivePetRegionHeight - activePetDisplay.frameHeight) / 2;
+  blitRgb565SpriteFrame(x, y, activePetDisplay.spritePixels, activePetDisplay.frameWidth,
+                        activePetDisplay.frameHeight, activePetDisplay.spriteStripWidth, frameIndex,
+                        activePetDisplay.stateRowIndex);
 }
 
 bool lcdFlush() {
@@ -832,6 +914,17 @@ void drawInteractionCompactFrame() {
 }
 
 void drawLcdFrame() {
+  if (petSwitching) {
+    bool blink = (millis() % 4300UL) > 4100UL;
+    lcdDrawText(6, 6, F("HSTUDIO"), 2, kColorFg);
+    drawWifiGlyph(196, 4, kColorFg);
+    lcdDrawHLine(0, 28, kLcdWidth, kColorMuted);
+    drawEye(40, 60, blink, true, false);
+    drawEye(144, 60, blink, true, false);
+    lcdDrawPetSwitchingLabel();
+    return;
+  }
+
   if (mcuInteractionActive) {
     if (activePetDisplay.available) {
       drawInteractionCompactFrame();
@@ -3487,6 +3580,7 @@ bool playPcmStereoStream(WiFiClient *stream, int contentLength, uint32_t sampleR
     playedBytes += written;
     handleTouchVolumeButtons();
     tickPlaybackUi();
+    mcuSocketLoop();
 
     pendingBytes = bufferedBytes - alignedBytes;
     if (pendingBytes > 0) memmove(buffer, buffer + alignedBytes, pendingBytes);
@@ -3597,6 +3691,7 @@ bool playPcmMonoStream(WiFiClient *stream, int contentLength, uint32_t sampleRat
     playedBytes += written;
     handleTouchVolumeButtons();
     tickPlaybackUi();
+    mcuSocketLoop();
 
     pendingBytes = bufferedBytes - alignedBytes;
     if (pendingBytes > 0) memmove(input, input + alignedBytes, pendingBytes);
@@ -3906,7 +4001,6 @@ bool enqueueMcuAudio(const McuAudioSegment &segment) {
   mcuAudioQueue[tail] = segment;
   ++mcuAudioCount;
   markMcuAudioSpeaking(segment.interactionId);
-  startNextMcuAudio();
   return true;
 }
 
@@ -3991,7 +4085,7 @@ void clearMcuSessionByButton() {
     broadcastMcuStatus();
     return;
   }
-  if (!waitForMcuSocketReady(8000)) {
+  if (!waitForMcuSocketReady(kVoiceSocketReadyTimeoutMs)) {
     markMcuInteraction(interactionId, F("failed"), F("SOCKET OFF"));
     Serial.printf("Session clear failed: SOCKET OFF activeUrl=%s token=%d profile=%s connected=%d namespace=%d\n",
                   activeDeviceUrl.c_str(), mcuAuthToken.length() > 0 ? 1 : 0, selectedProfile.c_str(),
@@ -4090,8 +4184,13 @@ void handleMcuWebSocketText(uint8_t clientId, const String &message) {
     return;
   }
   if (type == F("pet.changed")) {
-    Serial.println(F("Pet changed notification received, will refresh"));
+    Serial.println(F("Pet changed notification received, switching display"));
+    clearActivePetDisplay();
+    petSwitching = true;
     petChangePending = true;
+    nextPetSwitchAttemptAtMs = millis();
+    lcdDirty = true;
+    refreshLcd(true);
     return;
   }
   if (type == F("mcu.reauth.required")) {
@@ -4275,7 +4374,7 @@ bool refreshActivePetDisplay(bool force) {
   if (endpoint.length() == 0) return false;
 
   HTTPClient http;
-  http.setTimeout(12000);
+  http.setTimeout(kActivePetHttpTimeoutMs);
   if (!http.begin(endpoint)) {
     activePetDisplay.lastRefreshedAtMs = now;
     return false;
@@ -4330,8 +4429,7 @@ bool refreshActivePetDisplay(bool force) {
   activePetDisplay.loadedSpriteRevision = 0;
   activePetDisplay.lastSpriteRefreshAtMs = 0;
   lcdDirty = true;
-  refreshActivePetSprite(true);
-  return true;
+  return refreshActivePetSprite(true);
 }
 
 bool refreshActivePetSprite(bool force) {
@@ -4351,7 +4449,7 @@ bool refreshActivePetSprite(bool force) {
   if (endpoint.length() == 0) return false;
 
   HTTPClient http;
-  http.setTimeout(30000);
+  http.setTimeout(kActivePetSpriteTimeoutMs);
   if (!http.begin(endpoint)) {
     activePetDisplay.lastSpriteRefreshAtMs = now;
     return false;
@@ -4413,11 +4511,16 @@ bool refreshActivePetSprite(bool force) {
 
   WiFiClient *stream = http.getStreamPtr();
   size_t readBytesTotal = 0;
+  uint32_t startedAt = millis();
   while (readBytesTotal < expectedBytes) {
     int available = stream->available();
     if (available <= 0) {
       if (!stream->connected()) break;
+      if (millis() - startedAt >= kActivePetSpriteTimeoutMs) break;
       delay(2);
+      if (wsReady) mcuSocketLoop();
+      handleTouchButtons();
+      refreshLcd();
       yield();
       continue;
     }
@@ -4425,6 +4528,10 @@ bool refreshActivePetSprite(bool force) {
     int bytesRead = stream->readBytes(reinterpret_cast<uint8_t *>(pixels) + readBytesTotal, toRead);
     if (bytesRead <= 0) break;
     readBytesTotal += static_cast<size_t>(bytesRead);
+    if (wsReady) mcuSocketLoop();
+    handleTouchButtons();
+    refreshLcd();
+    yield();
   }
   http.end();
 
@@ -4481,7 +4588,7 @@ bool refreshPetState() {
   if (endpoint.length() == 0) return false;
 
   HTTPClient http;
-  http.setTimeout(8000);
+  http.setTimeout(kActivePetHttpTimeoutMs);
   if (!http.begin(endpoint)) return false;
   http.addHeader(F("Authorization"), String(F("Bearer ")) + mcuAuthToken);
   http.addHeader(F("X-Hermes-Profile"), selectedProfile);
@@ -5499,8 +5606,9 @@ void connectMcuSocketClient() {
   } else {
     mcuWsClient = &mcuWsPlainClient;
   }
-  mcuWsClient->setTimeout(5);
-  if (!mcuWsClient->connect(host.c_str(), port, 5000)) {
+  lastMcuSocketConnectAtMs = millis();
+  mcuWsClient->setTimeout(1000);
+  if (!mcuWsClient->connect(host.c_str(), port, 1000)) {
     Serial.printf("Socket.IO tcp connect failed host=%s port=%u\n", host.c_str(), port);
     return;
   }
@@ -5537,6 +5645,7 @@ void connectMcuSocketClient() {
   mcuSocketConnected = true;
   mcuSocketNamespaceReady = false;
   mcuSocketTargetKey = targetKey;
+  mcuWsClient->setTimeout(5);
   lastMcuSocketConnectAtMs = millis();
   Serial.printf("Socket.IO client connecting host=%s port=%u profile=%s\n",
                 host.c_str(), port, selectedProfile.c_str());
@@ -5752,6 +5861,10 @@ void handleHealth() {
 }
 
 void tickMcuInteraction() {
+  if (!mcuAudioPlaying && mcuAudioCount > 0) {
+    startNextMcuAudio();
+  }
+
   if (mcuAudioPlaying && mcuAudioDurationMs > 0 &&
       millis() - mcuAudioStartedAtMs >= mcuAudioDurationMs) {
     bool completionManagedByServer = mcuCurrentAudio.completionManagedByServer;
@@ -5834,35 +5947,58 @@ void setupRoutes() {
 }
 
 void initializeWakeWord() {
+  ESP_LOGI("WAKE", "initialization started");
   wakeWordModels = esp_srmodel_init("model");
   if (wakeWordModels == nullptr || wakeWordModels->num == -1) {
-    Serial.println(F("Wake word model unavailable"));
+    ESP_LOGE("WAKE", "model unavailable");
     return;
   }
 
   char *modelName = esp_srmodel_filter(wakeWordModels, ESP_MN_PREFIX, "cn");
   if (modelName == nullptr) modelName = esp_srmodel_filter(wakeWordModels, ESP_MN_PREFIX, nullptr);
   if (modelName == nullptr) {
-    Serial.println(F("Wake word MultiNet model unavailable"));
+    ESP_LOGE("WAKE", "MultiNet model unavailable");
     return;
   }
 
   wakeWordRecognizer = esp_mn_handle_from_name(modelName);
+  if (wakeWordRecognizer == nullptr) {
+    ESP_LOGE("WAKE", "recognizer unavailable: %s", modelName);
+    return;
+  }
   wakeWordRecognizerData = wakeWordRecognizer->create(modelName, 3000);
   if (wakeWordRecognizerData == nullptr) {
-    Serial.println(F("Wake word MultiNet initialization failed"));
+    ESP_LOGE("WAKE", "MultiNet initialization failed");
+    return;
+  }
+  wakeWordSampleRate = wakeWordRecognizer->get_samp_rate(wakeWordRecognizerData);
+  if (wakeWordSampleRate == 0 || wakeWordSampleRate > kVoiceInputSampleRate) {
+    ESP_LOGE("WAKE", "unsupported sample rate: %lu Hz", static_cast<unsigned long>(wakeWordSampleRate));
+    wakeWordRecognizer->destroy(wakeWordRecognizerData);
+    wakeWordRecognizerData = nullptr;
     return;
   }
   wakeWordRecognizer->set_det_threshold(wakeWordRecognizerData, CONFIG_HERMES_WAKE_WORD_THRESHOLD / 100.0f);
-  if (esp_mn_commands_alloc(wakeWordRecognizer, wakeWordRecognizerData) != ESP_OK) {
-    Serial.println(F("Wake word command allocation failed"));
+  esp_err_t commandAllocation = esp_mn_commands_alloc(wakeWordRecognizer, wakeWordRecognizerData);
+  if (commandAllocation != ESP_OK) {
+    ESP_LOGE("WAKE", "command allocation failed: %s", esp_err_to_name(commandAllocation));
     return;
   }
   esp_mn_commands_clear();
-  esp_mn_commands_add(1, CONFIG_HERMES_WAKE_WORD_COMMAND);
-  esp_mn_commands_update();
+  esp_err_t commandAdd = esp_mn_commands_add(1, CONFIG_HERMES_WAKE_WORD_COMMAND);
+  esp_mn_error_t *commandUpdate = commandAdd == ESP_OK ? esp_mn_commands_update() : nullptr;
+  if (commandAdd != ESP_OK || commandUpdate != nullptr) {
+    ESP_LOGE("WAKE", "command rejected: %s add=%s update=%p",
+             CONFIG_HERMES_WAKE_WORD_COMMAND, esp_err_to_name(commandAdd), commandUpdate);
+    esp_mn_commands_free();
+    wakeWordRecognizer->destroy(wakeWordRecognizerData);
+    wakeWordRecognizerData = nullptr;
+    return;
+  }
   wakeWordReady = true;
-  Serial.printf("Wake word ready: %s (%s)\n", CONFIG_HERMES_WAKE_WORD_DISPLAY, CONFIG_HERMES_WAKE_WORD_COMMAND);
+  ESP_LOGI("WAKE", "ready phrase=%s model=%s rate=%lu chunk=%d threshold=%d",
+           CONFIG_HERMES_WAKE_WORD_COMMAND, modelName, static_cast<unsigned long>(wakeWordSampleRate),
+           wakeWordRecognizer->get_samp_chunksize(wakeWordRecognizerData), CONFIG_HERMES_WAKE_WORD_THRESHOLD);
 }
 
 void tickWakeWord() {
@@ -5871,25 +6007,47 @@ void tickWakeWord() {
   constexpr size_t kReadBytes = 512;
   uint8_t readBuffer[kReadBytes];
   size_t bytesRead = 0;
-  if (i2s_read(kI2sPort, readBuffer, sizeof(readBuffer), &bytesRead, 0) != ESP_OK || bytesRead == 0) return;
+  esp_err_t readResult = i2s_read(kI2sPort, readBuffer, sizeof(readBuffer), &bytesRead, pdMS_TO_TICKS(20));
+  if (readResult != ESP_OK || bytesRead == 0) return;
 
   int16_t *samples = reinterpret_cast<int16_t *>(readBuffer);
   const size_t sampleCount = bytesRead / sizeof(int16_t);
-  for (size_t index = 0; index + 1 < sampleCount; index += 2) wakeWordSamples.push_back(samples[index]);
+  for (size_t index = 0; index + 1 < sampleCount; index += 2) {
+    const int32_t mixed = (static_cast<int32_t>(samples[index]) + samples[index + 1]) / 2;
+    const int16_t mono = shapeVoiceInputSample(static_cast<int16_t>(mixed));
+    wakeWordResamplePhase += wakeWordSampleRate;
+    if (wakeWordResamplePhase >= kVoiceInputSampleRate) {
+      wakeWordResamplePhase -= kVoiceInputSampleRate;
+      wakeWordSamples.push_back(mono);
+    }
+  }
 
   const size_t chunkSize = wakeWordRecognizer->get_samp_chunksize(wakeWordRecognizerData);
   while (wakeWordSamples.size() >= chunkSize) {
     esp_mn_state_t state = wakeWordRecognizer->detect(wakeWordRecognizerData, wakeWordSamples.data());
+    ++wakeWordDetectedChunks;
     wakeWordSamples.erase(wakeWordSamples.begin(), wakeWordSamples.begin() + chunkSize);
     if (state == ESP_MN_STATE_DETECTED) {
-      Serial.printf("Wake word detected: %s\n", CONFIG_HERMES_WAKE_WORD_DISPLAY);
+      ESP_LOGI("WAKE", "detected phrase=%s chunks=%lu", CONFIG_HERMES_WAKE_WORD_COMMAND,
+               static_cast<unsigned long>(wakeWordDetectedChunks));
       wakeWordRecognizer->clean(wakeWordRecognizerData);
+      wakeWordSamples.clear();
+      wakeWordResamplePhase = 0;
       wakeWordVoiceTurn = true;
       triggerBootVoiceTurn(false);
       wakeWordVoiceTurn = false;
+      wakeWordRecognizer->clean(wakeWordRecognizerData);
+      wakeWordSamples.clear();
+      wakeWordResamplePhase = 0;
+      ESP_LOGI("WAKE", "listener reset after voice turn");
       return;
     }
     if (state == ESP_MN_STATE_TIMEOUT) wakeWordRecognizer->clean(wakeWordRecognizerData);
+  }
+  if (millis() - wakeWordLastDiagnosticAtMs >= 1000) {
+    wakeWordLastDiagnosticAtMs = millis();
+    ESP_LOGI("WAKE", "feeding bytes=%u chunks=%lu buffered=%u", static_cast<unsigned>(bytesRead),
+             static_cast<unsigned long>(wakeWordDetectedChunks), static_cast<unsigned>(wakeWordSamples.size()));
   }
 }
 }  // namespace
@@ -5939,15 +6097,25 @@ void loop() {
 
   server.handleClient();
   if (wsReady) mcuSocketLoop();
+  if (wifiReady && WiFi.status() == WL_CONNECTED && activeDeviceUrl.length() > 0 &&
+      mcuAuthToken.length() > 0 && selectedProfile.length() > 0 && !mcuSocketNamespaceReady &&
+      millis() - lastMcuSocketConnectAtMs >= kMcuSocketReconnectMs) {
+    connectMcuSocketClient();
+  }
   tickMcuInteraction();
   tickLcdStatusReturn();
-  if (petChangePending) {
+  if (petChangePending || (petSwitching && static_cast<int32_t>(millis() - nextPetSwitchAttemptAtMs) >= 0)) {
     petChangePending = false;
     Serial.println(F("Processing pet change refresh"));
     activePetDisplay.lastRefreshedAtMs = 0;
     activePetDisplay.lastSpriteRefreshAtMs = 0;
-    refreshActivePetDisplay(true);
-  } else {
+    if (refreshActivePetDisplay(true)) {
+      petSwitching = false;
+      lcdDirty = true;
+    } else {
+      nextPetSwitchAttemptAtMs = millis() + kActivePetRetryMs;
+    }
+  } else if (!petSwitching) {
     refreshActivePetDisplay();
   }
   refreshLcd();
