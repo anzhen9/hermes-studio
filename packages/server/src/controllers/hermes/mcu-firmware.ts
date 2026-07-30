@@ -48,7 +48,7 @@ const TARGETS: Record<FirmwareTarget, TargetConfig> = {
     legacyDistFallback: resolve(process.cwd(), 'dist', 'mcu', 'firmware.bin'),
   },
   sparkbot: {
-    target: 'hstudio-esp32-sparkbot',
+    target: 'hstudio-esp-sparkbot',
     legacyRoute: '/api/hermes/mcu/sparkbot/firmware.bin',
     versionedRoute: (version) => `/api/hermes/mcu/sparkbot/firmware/${version}/firmware.bin`,
     distPathByVersion: {
@@ -56,8 +56,8 @@ const TARGETS: Record<FirmwareTarget, TargetConfig> = {
       v2: resolve(process.cwd(), 'dist', 'mcu', 'sparkbot', 'v2', 'firmware.bin'),
     },
     devPathByVersion: {
-      v1: resolve(process.cwd(), 'packages/esp32-sparkbot/v1/.pio/build/esp32-s3-devkitc-1/firmware.bin'),
-      v2: resolve(process.cwd(), 'packages/esp32-sparkbot/v2/build/hstudio_sparkbot.bin'),
+      v1: resolve(process.cwd(), 'packages/esp-sparkbot/v1/.pio/build/esp32-s3-devkitc-1/firmware.bin'),
+      v2: resolve(process.cwd(), 'packages/esp-sparkbot/v2/build/hstudio_sparkbot.bin'),
     },
     legacyDistFallback: resolve(process.cwd(), 'dist', 'mcu', 'sparkbot-firmware.bin'),
   },

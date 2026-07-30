@@ -122,7 +122,7 @@ describe('MCU firmware controller', () => {
     expect(ctx.set).toHaveBeenCalledWith('Cache-Control', 'no-store')
     expect(ctx.body).toMatchObject({
       updateAvailable: true,
-      target: 'hstudio-esp32-sparkbot',
+      target: 'hstudio-esp-sparkbot',
       channel: 'production',
       firmwareVersion: 'v1',
       size: firmware.length,
@@ -147,7 +147,7 @@ describe('MCU firmware controller', () => {
     expect(ctx.status).toBe(200)
     expect(ctx.body).toMatchObject({
       updateAvailable: true,
-      target: 'hstudio-esp32-sparkbot',
+      target: 'hstudio-esp-sparkbot',
       firmwareVersion: 'v2',
       size: firmware.length,
       md5: createHash('md5').update(firmware).digest('hex'),
