@@ -42,14 +42,14 @@ playback flows are retained from the C3 base.
 ## Commands
 
 ```bash
-cd packages/esp32-sparkbot/v1
+cd packages/esp-sparkbot/v1
 pio run
 pio run -t upload
 pio device monitor
 ```
 
 After `pio run`, run `npm run build` from the repository root to sync the
-firmware into `packages/esp32-sparkbot/release/v1/firmware.bin` and package it
+firmware into `packages/esp-sparkbot/release/v1/firmware.bin` and package it
 into `dist/mcu/sparkbot/v1/firmware.bin`. GitHub release builds reuse the
 checked-in release firmware and do not build ESP32 firmware in CI.
 

@@ -88,9 +88,9 @@ const sparkbotFirmwareOutDir = resolve(rootDir, 'dist/mcu/sparkbot')
 const legacySparkbotFirmwareOutPath = resolve(firmwareOutDir, 'sparkbot-firmware.bin')
 for (const sparkbotFirmwareVersion of ['v1', 'v2']) {
   const sparkbotFirmwareBuildSrc = sparkbotFirmwareVersion === 'v1'
-    ? resolve(rootDir, 'packages/esp32-sparkbot/v1/.pio/build/esp32-s3-devkitc-1/firmware.bin')
-    : resolve(rootDir, 'packages/esp32-sparkbot/v2/build/hstudio_sparkbot.bin')
-  const sparkbotFirmwareReleaseSrc = resolve(rootDir, `packages/esp32-sparkbot/release/${sparkbotFirmwareVersion}/firmware.bin`)
+    ? resolve(rootDir, 'packages/esp-sparkbot/v1/.pio/build/esp32-s3-devkitc-1/firmware.bin')
+    : resolve(rootDir, 'packages/esp-sparkbot/v2/build/hstudio_sparkbot.bin')
+  const sparkbotFirmwareReleaseSrc = resolve(rootDir, `packages/esp-sparkbot/release/${sparkbotFirmwareVersion}/firmware.bin`)
   const sparkbotFirmwareVersionedOutDir = resolve(sparkbotFirmwareOutDir, sparkbotFirmwareVersion)
   const sparkbotFirmwareOutPath = resolve(sparkbotFirmwareVersionedOutDir, 'firmware.bin')
 
