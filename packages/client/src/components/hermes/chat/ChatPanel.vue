@@ -2212,28 +2212,6 @@ async function handleSessionModelCustomSubmit() {
         <div v-if="filteredSessionModelGroups.length === 0" class="session-model-empty">
           {{ sessionModelSearch ? 'No results' : 'No models' }}
         </div>
-        <div class="session-model-custom">
-          <div class="session-model-custom-row">
-            <NSelect
-              v-model:value="sessionModelCustomProvider"
-              :options="sessionModelProviderOptions"
-              :disabled="sessionModelSwitching"
-              size="small"
-              class="session-model-custom-provider"
-            />
-            <NInput
-              v-model:value="sessionModelCustomInput"
-              :placeholder="t('models.customModelPlaceholder')"
-              :disabled="sessionModelSwitching"
-              size="small"
-              class="session-model-custom-input"
-              @keydown.enter="handleSessionModelCustomSubmit"
-            />
-          </div>
-          <div class="session-model-custom-hint">
-            {{ t('models.customModelHint') }}
-          </div>
-        </div>
         </div>
         <div v-else class="session-model-list" :aria-busy="sessionModelSwitching">
           <div class="session-model-group-items session-moa-items">
@@ -2269,6 +2247,28 @@ async function handleSessionModelCustomSubmit() {
           </div>
           <div v-if="filteredSessionMoaModels.length === 0" class="session-model-empty">
             {{ t('chat.noMoaPresets') }}
+          </div>
+        </div>
+        <div v-if="sessionModelKind === 'model'" class="session-model-custom">
+          <div class="session-model-custom-row">
+            <NSelect
+              v-model:value="sessionModelCustomProvider"
+              :options="sessionModelProviderOptions"
+              :disabled="sessionModelSwitching"
+              size="small"
+              class="session-model-custom-provider"
+            />
+            <NInput
+              v-model:value="sessionModelCustomInput"
+              :placeholder="t('models.customModelPlaceholder')"
+              :disabled="sessionModelSwitching"
+              size="small"
+              class="session-model-custom-input"
+              @keydown.enter="handleSessionModelCustomSubmit"
+            />
+          </div>
+          <div class="session-model-custom-hint">
+            {{ t('models.customModelHint') }}
           </div>
         </div>
       </NSpin>
@@ -2650,6 +2650,7 @@ async function handleSessionModelCustomSubmit() {
             <MessageList
               ref="messageListRef"
               :approval-portal-to-body="showRealtimeVoice"
+              scroll-scope="chat"
             />
             <ChatInput
               ref="chatInputRef"
@@ -2837,11 +2838,11 @@ async function handleSessionModelCustomSubmit() {
 }
 
 .session-model-group-items {
-  padding-left: 8px;
+  padding-inline-start: 8px;
 }
 
 .session-moa-items {
-  padding-left: 0;
+  padding-inline-start: 0;
 }
 
 .session-model-item {
@@ -2919,7 +2920,7 @@ async function handleSessionModelCustomSubmit() {
   font-weight: 600;
   padding: 1px 5px;
   border-radius: 3px;
-  margin-right: 4px;
+  margin-inline-end: 4px;
   letter-spacing: 0.03em;
 }
 
@@ -2992,8 +2993,8 @@ async function handleSessionModelCustomSubmit() {
 
   &.collapsed {
     width: 0;
-    margin-left: 0;
-    margin-right: 0;
+    margin-inline-start: 0;
+    margin-inline-end: 0;
     border: none;
     box-shadow: none;
     opacity: 0;
@@ -3357,7 +3358,7 @@ async function handleSessionModelCustomSubmit() {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
 
   &--sidebar-collapsed {
-    margin-left: 10px;
+    margin-inline-start: 10px;
   }
 
   @media (max-width: $breakpoint-mobile) {
@@ -3457,7 +3458,7 @@ async function handleSessionModelCustomSubmit() {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-right: 4px;
+  margin-inline-end: 4px;
 }
 
 @media (max-width: $breakpoint-mobile) {
@@ -3518,7 +3519,7 @@ async function handleSessionModelCustomSubmit() {
   min-width: 320px;
   max-width: 100%;
   background: $bg-card;
-  border-left: 1px solid $border-color;
+  border-inline-start: 1px solid $border-color;
   display: flex;
   min-height: 0;
   overflow: visible;
@@ -3647,7 +3648,7 @@ async function handleSessionModelCustomSubmit() {
     left: 0;
     width: 100% !important;
     min-width: 0;
-    border-left: none;
+    border-inline-start: none;
     box-shadow: none;
   }
 
@@ -3769,7 +3770,7 @@ async function handleSessionModelCustomSubmit() {
 
 .workspace-default-badge {
   display: inline-block;
-  margin-left: 6px;
+  margin-inline-start: 6px;
   padding: 1px 6px;
   font-size: 10px;
   font-weight: 600;

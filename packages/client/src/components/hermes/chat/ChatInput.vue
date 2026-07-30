@@ -187,6 +187,12 @@ function backendTranscribeOptions(): {
     }
   }
 
+  if (sttSettings.provider.value !== 'browser') {
+    return {
+      provider: sttSettings.provider.value,
+    }
+  }
+
   return {
     provider: 'openai',
     language: sttSettings.openaiLanguage.value.trim() || undefined,
@@ -1678,7 +1684,7 @@ function isImage(type: string): boolean {
   align-items: center;
   gap: 5px;
   padding: 0 0 0 2px;
-  margin-left: 0;
+  margin-inline-start: 0;
 
   .switch-label {
     display: flex;
@@ -1696,7 +1702,7 @@ function isImage(type: string): boolean {
 
   :deep(.n-switch),
   :deep(.n-switch__rail) {
-    margin-right: 0;
+    margin-inline-end: 0;
   }
 }
 
@@ -1708,7 +1714,7 @@ function isImage(type: string): boolean {
   width: 24px;
   min-width: 24px;
   height: 22px;
-  margin-left: 0;
+  margin-inline-start: 0;
   padding: 0;
   background: transparent !important;
   opacity: 1;
@@ -1985,7 +1991,7 @@ function isImage(type: string): boolean {
 .context-bar {
   width: 60px;
   height: 4px;
-  margin-left: -4px;
+  margin-inline-start: -4px;
   background: rgba(var(--text-muted-rgb), 0.2);
   border-radius: 2px;
   overflow: hidden;
@@ -2502,7 +2508,7 @@ function isImage(type: string): boolean {
   border-radius: $radius-sm;
   background: $bg-secondary;
   color: $text-primary;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
   overflow: hidden;
   outline: none;
@@ -2530,7 +2536,7 @@ function isImage(type: string): boolean {
   border: 0;
   background: transparent;
   color: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
   outline: none;
 }
