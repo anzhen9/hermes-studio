@@ -46,6 +46,9 @@ const profileModelsMissing = computed(() =>
 )
 const isGlobalAgentSession = computed(() => props.session.source === 'global_agent')
 const sessionAgentLogo = computed(() => {
+  if (isGlobalAgentSession.value) {
+    return { label: 'Ekko Agent', src: '/coding-agents/ekko-agent.png' }
+  }
   if (props.session.source === 'coding_agent') {
     if (props.session.codingAgentId === 'codex' || props.session.agent === 'codex') {
       return { label: 'Codex', src: '/coding-agents/codex-openai.png' }
@@ -143,7 +146,7 @@ onUnmounted(() => {
             </svg>
           </span>
           <span v-if="completedUnread" class="session-item-unread-dot" aria-hidden="true" />
-          <span class="session-item-title">
+          <span class="session-item-title" dir="auto">
             {{ session.title }}
           </span>
           <NTooltip v-if="profileModelsMissing" trigger="click" placement="top">
@@ -212,7 +215,7 @@ onUnmounted(() => {
   background: none;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  text-align: left;
+  text-align: start;
   text-decoration: none;
   color: var(--text-secondary);
   transition: all var(--transition-fast);

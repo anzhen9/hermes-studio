@@ -12,9 +12,13 @@
 #include <memory>
 #include <vector>
 #include "driver/i2s.h"
+#include "esp_crc.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_rom_sys.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mbedtls/base64.h"
 #include "esp_mn_iface.h"
 #include "esp_mn_models.h"
@@ -78,6 +82,10 @@ constexpr uint32_t kActivePetRetryMs = 10000;
 constexpr uint32_t kActivePetStateIntervalMs = 10000;
 constexpr uint32_t kActivePetHttpTimeoutMs = 800;
 constexpr uint32_t kActivePetSpriteTimeoutMs = 30000;
+constexpr char kPetCachePartitionLabel[] = "pet_cache";
+constexpr uint32_t kPetCacheMagic = 0x48535043;
+constexpr uint16_t kPetCacheVersion = 1;
+constexpr size_t kPetCacheHeaderBytes = 4096;
 constexpr uint32_t kProvisionRestartDelayMs = 2500;
 constexpr uint32_t kProvisionRedirectDelayMs = 6500;
 constexpr int kMaxScannedNetworks = 20;
@@ -140,6 +148,8 @@ constexpr uint16_t kVolumeFeedbackFrequencyHz = 1000;
 constexpr uint16_t kVolumeFeedbackDurationMs = 500;
 constexpr uint16_t kVolumeFeedbackFadeMs = 8;
 constexpr int16_t kVolumeFeedbackAmplitude = 9000;
+constexpr uint32_t kWakeWordTaskStackWords = 4096;
+constexpr UBaseType_t kWakeWordTaskPriority = 3;
 constexpr i2s_port_t kI2sPort = I2S_NUM_0;
 
 // --- Color palette (RGB565) ---
@@ -229,6 +239,10 @@ bool mcuSessionClearAfterAudioInterrupt = false;
 bool voiceRecordHeardSpeech = false;
 bool wakeWordVoiceTurn = false;
 bool wakeWordReady = false;
+volatile bool wakeWordListeningEnabled = false;
+volatile bool wakeWordDetectedPending = false;
+volatile bool wakeWordTaskSampling = false;
+TaskHandle_t wakeWordTaskHandle = nullptr;
 srmodel_list_t *wakeWordModels = nullptr;
 esp_mn_iface_t *wakeWordRecognizer = nullptr;
 model_iface_data_t *wakeWordRecognizerData = nullptr;
@@ -300,9 +314,14 @@ void enqueueNoDevicePrompt(const String &interactionId);
 String activeDeviceEndpoint(const __FlashStringHelper *path);
 String activeDeviceEndpoint(const char *path);
 void clearActivePetDisplay();
+bool loadActivePetCache();
+bool saveActivePetCache();
+void clearActivePetCache();
 bool refreshActivePetDisplay(bool force = false);
 bool refreshActivePetSprite(bool force = false);
 bool refreshPetState();
+void startWakeWordTask();
+void tickWakeWord();
 bool downloadAndApplyMcuFirmware(const String &url, const String &md5, int expectedSize);
 
 enum class McuOtaResult : uint8_t {
@@ -352,9 +371,31 @@ struct ActivePetDisplay {
   uint16_t *spritePixels = nullptr;
 };
 
+struct PetCacheHeader {
+  uint32_t magic = kPetCacheMagic;
+  uint16_t version = kPetCacheVersion;
+  uint16_t headerBytes = kPetCacheHeaderBytes;
+  uint32_t payloadBytes = 0;
+  uint32_t payloadCrc32 = 0;
+  uint32_t spritesheetRevision = 0;
+  uint32_t loopMs = 1100;
+  uint16_t frameWidth = 0;
+  uint16_t frameHeight = 0;
+  uint16_t spriteStripWidth = 0;
+  uint16_t spriteStripHeight = 0;
+  uint8_t frameCount = 1;
+  uint8_t rowCount = 0;
+  char profile[64] = {};
+  char slug[64] = {};
+  char displayName[64] = {};
+  char kind[32] = {};
+  char submittedBy[64] = {};
+};
+
 LanDevice lanDevices[kMaxLanDevices];
 int lanDeviceCount = 0;
 ActivePetDisplay activePetDisplay;
+const esp_partition_t *petCachePartition = nullptr;
 bool petChangePending = false;
 bool petSwitching = false;
 uint32_t nextPetSwitchAttemptAtMs = 0;
@@ -2789,7 +2830,6 @@ bool runMcuLogin(LanDevice &device, const String &account, const String &passwor
     prefs.end();
     parseLoginProfiles(response);
     connectMcuSocketClient();
-    clearActivePetDisplay();
     setLcdStatus(LcdMode::Ready, F("LOGIN"), F("OK"), 100);
   } else {
     clearLoginProfiles();
@@ -2826,7 +2866,7 @@ bool autoLoginDevice(LanDevice &device) {
     pendingProfileDeviceKey = key;
     activeDeviceKey = key;
     activeDeviceUrl = device.url;
-    clearActivePetDisplay();
+    refreshActivePetDisplay(true);
   }
   return ok;
 }
@@ -4350,6 +4390,106 @@ void clearActivePetDisplay() {
   activePetDisplay = ActivePetDisplay();
 }
 
+void copyPetCacheString(char *target, size_t targetSize, const String &value) {
+  if (targetSize == 0) return;
+  strncpy(target, value.c_str(), targetSize - 1);
+  target[targetSize - 1] = '\0';
+}
+
+bool openPetCachePartition() {
+  if (petCachePartition) return true;
+  petCachePartition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
+                                                kPetCachePartitionLabel);
+  if (!petCachePartition) {
+    Serial.println(F("Pet cache partition unavailable"));
+    return false;
+  }
+  return true;
+}
+
+void clearActivePetCache() {
+  if (!openPetCachePartition()) return;
+  if (esp_partition_erase_range(petCachePartition, 0, petCachePartition->size) != ESP_OK) {
+    Serial.println(F("Pet cache erase failed"));
+  }
+}
+
+bool loadActivePetCache() {
+  if (!openPetCachePartition()) return false;
+
+  PetCacheHeader header;
+  if (esp_partition_read(petCachePartition, 0, &header, sizeof(header)) != ESP_OK ||
+      header.magic != kPetCacheMagic || header.version != kPetCacheVersion ||
+      header.headerBytes != kPetCacheHeaderBytes || String(header.profile) != selectedProfile ||
+      header.slug[0] == '\0' || header.frameWidth == 0 || header.frameHeight == 0 ||
+      header.spriteStripWidth == 0 || header.spriteStripHeight == 0 || header.rowCount == 0 ||
+      header.payloadBytes == 0 || header.payloadBytes > petCachePartition->size - kPetCacheHeaderBytes) {
+    return false;
+  }
+
+  uint16_t *pixels = static_cast<uint16_t *>(ps_malloc(header.payloadBytes));
+  if (!pixels || esp_partition_read(petCachePartition, kPetCacheHeaderBytes, pixels, header.payloadBytes) != ESP_OK) {
+    if (pixels) free(pixels);
+    return false;
+  }
+  if (esp_crc32_le(UINT32_MAX, reinterpret_cast<const uint8_t *>(pixels), header.payloadBytes) != header.payloadCrc32) {
+    free(pixels);
+    return false;
+  }
+
+  clearActivePetDisplay();
+  activePetDisplay.available = true;
+  activePetDisplay.slug = header.slug;
+  activePetDisplay.displayName = header.displayName;
+  activePetDisplay.kind = header.kind;
+  activePetDisplay.submittedBy = header.submittedBy;
+  activePetDisplay.frameCount = header.frameCount;
+  activePetDisplay.loopMs = header.loopMs;
+  activePetDisplay.spritesheetRevision = header.spritesheetRevision;
+  activePetDisplay.loadedSpriteRevision = header.spritesheetRevision;
+  activePetDisplay.frameWidth = header.frameWidth;
+  activePetDisplay.frameHeight = header.frameHeight;
+  activePetDisplay.spriteStripWidth = header.spriteStripWidth;
+  activePetDisplay.spriteStripHeight = header.spriteStripHeight;
+  activePetDisplay.rowCount = header.rowCount;
+  activePetDisplay.spritePixels = pixels;
+  lcdDirty = true;
+  Serial.printf("Pet cache restored slug=%s bytes=%u\n", header.slug, static_cast<unsigned>(header.payloadBytes));
+  return true;
+}
+
+bool saveActivePetCache() {
+  if (!openPetCachePartition() || !activePetDisplay.spritePixels) return false;
+  size_t payloadBytes = static_cast<size_t>(activePetDisplay.spriteStripWidth) * activePetDisplay.spriteStripHeight * sizeof(uint16_t);
+  if (payloadBytes == 0 || payloadBytes > petCachePartition->size - kPetCacheHeaderBytes) return false;
+
+  PetCacheHeader header;
+  header.payloadBytes = payloadBytes;
+  header.payloadCrc32 = esp_crc32_le(UINT32_MAX, reinterpret_cast<const uint8_t *>(activePetDisplay.spritePixels), payloadBytes);
+  header.spritesheetRevision = activePetDisplay.spritesheetRevision;
+  header.loopMs = activePetDisplay.loopMs;
+  header.frameWidth = activePetDisplay.frameWidth;
+  header.frameHeight = activePetDisplay.frameHeight;
+  header.spriteStripWidth = activePetDisplay.spriteStripWidth;
+  header.spriteStripHeight = activePetDisplay.spriteStripHeight;
+  header.frameCount = activePetDisplay.frameCount;
+  header.rowCount = activePetDisplay.rowCount;
+  copyPetCacheString(header.profile, sizeof(header.profile), selectedProfile);
+  copyPetCacheString(header.slug, sizeof(header.slug), activePetDisplay.slug);
+  copyPetCacheString(header.displayName, sizeof(header.displayName), activePetDisplay.displayName);
+  copyPetCacheString(header.kind, sizeof(header.kind), activePetDisplay.kind);
+  copyPetCacheString(header.submittedBy, sizeof(header.submittedBy), activePetDisplay.submittedBy);
+
+  if (esp_partition_erase_range(petCachePartition, 0, petCachePartition->size) != ESP_OK ||
+      esp_partition_write(petCachePartition, kPetCacheHeaderBytes, activePetDisplay.spritePixels, payloadBytes) != ESP_OK ||
+      esp_partition_write(petCachePartition, 0, &header, sizeof(header)) != ESP_OK) {
+    Serial.println(F("Pet cache write failed"));
+    return false;
+  }
+  Serial.printf("Pet cache saved slug=%s bytes=%u\n", activePetDisplay.slug.c_str(), static_cast<unsigned>(payloadBytes));
+  return true;
+}
+
 bool refreshActivePetDisplay(bool force) {
   uint32_t now = millis();
   if (!force && activePetDisplay.lastRefreshedAtMs > 0 && now < activePetDisplay.lastRefreshedAtMs) {
@@ -4394,6 +4534,7 @@ bool refreshActivePetDisplay(bool force) {
 
   if (body.indexOf(F("\"pet\":null")) >= 0) {
     clearActivePetDisplay();
+    clearActivePetCache();
     return true;
   }
 
@@ -4404,7 +4545,9 @@ bool refreshActivePetDisplay(bool force) {
     return false;
   }
 
-  bool changed = !activePetDisplay.available || activePetDisplay.slug != slug;
+  uint32_t spritesheetRevision = static_cast<uint32_t>(jsonIntValue(petJson, F("spritesheetRevision")));
+  bool changed = !activePetDisplay.available || activePetDisplay.slug != slug ||
+                 activePetDisplay.loadedSpriteRevision != spritesheetRevision;
 
   if (changed && activePetDisplay.spritePixels) {
     free(activePetDisplay.spritePixels);
@@ -4425,10 +4568,16 @@ bool refreshActivePetDisplay(bool force) {
   activePetDisplay.submittedBy = jsonStringValue(petJson, F("submittedBy"));
   activePetDisplay.frameCount = static_cast<uint8_t>(max(1, jsonIntValue(petJson, F("framesPerState"))));
   activePetDisplay.loopMs = static_cast<uint32_t>(max(1, jsonIntValue(petJson, F("loopMs"))));
-  activePetDisplay.spritesheetRevision = static_cast<uint32_t>(jsonIntValue(petJson, F("spritesheetRevision")));
-  activePetDisplay.loadedSpriteRevision = 0;
-  activePetDisplay.lastSpriteRefreshAtMs = 0;
+  activePetDisplay.spritesheetRevision = spritesheetRevision;
+  if (changed) {
+    activePetDisplay.loadedSpriteRevision = 0;
+    activePetDisplay.lastSpriteRefreshAtMs = 0;
+  }
   lcdDirty = true;
+  if (!changed && activePetDisplay.spritePixels) {
+    refreshPetState();
+    return true;
+  }
   return refreshActivePetSprite(true);
 }
 
@@ -4552,6 +4701,7 @@ bool refreshActivePetSprite(bool force) {
   activePetDisplay.rowCount = rowCount;
   activePetDisplay.loadedSpriteRevision = activePetDisplay.spritesheetRevision;
   activePetDisplay.lastSpriteRefreshAtMs = now;
+  saveActivePetCache();
   lcdDirty = true;
   return true;
 }
@@ -5095,6 +5245,17 @@ void handleVoiceTurnResponse(const String &interactionId, const String &response
 }
 
 void triggerBootVoiceTurn(bool touchTriggered) {
+  struct WakeWordListeningGuard {
+    WakeWordListeningGuard() {
+      wakeWordListeningEnabled = false;
+      uint32_t stoppedAt = millis() + 50;
+      while (wakeWordTaskSampling && static_cast<int32_t>(millis() - stoppedAt) < 0) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
+    }
+    ~WakeWordListeningGuard() { wakeWordListeningEnabled = wakeWordReady; }
+  } wakeWordListeningGuard;
+
   Serial.printf("Voice trigger wifi=%d status=%d activeUrl=%s token=%d profile=%s socket=%d audioBusy=%d playing=%d heap=%lu\n",
                 wifiReady ? 1 : 0, static_cast<int>(WiFi.status()), activeDeviceUrl.c_str(),
                 mcuAuthToken.length() > 0 ? 1 : 0, selectedProfile.c_str(), mcuSocketNamespaceReady ? 1 : 0,
@@ -6002,7 +6163,7 @@ void initializeWakeWord() {
 }
 
 void tickWakeWord() {
-  if (!wakeWordReady || audioBusy || mcuAudioPlaying || !wifiReady) return;
+  if (!wakeWordListeningEnabled || !wakeWordReady || audioBusy || mcuAudioPlaying || !wifiReady) return;
 
   constexpr size_t kReadBytes = 512;
   uint8_t readBuffer[kReadBytes];
@@ -6033,13 +6194,8 @@ void tickWakeWord() {
       wakeWordRecognizer->clean(wakeWordRecognizerData);
       wakeWordSamples.clear();
       wakeWordResamplePhase = 0;
-      wakeWordVoiceTurn = true;
-      triggerBootVoiceTurn(false);
-      wakeWordVoiceTurn = false;
-      wakeWordRecognizer->clean(wakeWordRecognizerData);
-      wakeWordSamples.clear();
-      wakeWordResamplePhase = 0;
-      ESP_LOGI("WAKE", "listener reset after voice turn");
+      wakeWordListeningEnabled = false;
+      wakeWordDetectedPending = true;
       return;
     }
     if (state == ESP_MN_STATE_TIMEOUT) wakeWordRecognizer->clean(wakeWordRecognizerData);
@@ -6049,6 +6205,29 @@ void tickWakeWord() {
     ESP_LOGI("WAKE", "feeding bytes=%u chunks=%lu buffered=%u", static_cast<unsigned>(bytesRead),
              static_cast<unsigned long>(wakeWordDetectedChunks), static_cast<unsigned>(wakeWordSamples.size()));
   }
+}
+
+void wakeWordTask(void *argument) {
+  for (;;) {
+    if (wakeWordListeningEnabled) {
+      wakeWordTaskSampling = true;
+      tickWakeWord();
+      wakeWordTaskSampling = false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+
+void startWakeWordTask() {
+  if (!wakeWordReady || wakeWordTaskHandle) return;
+  wakeWordListeningEnabled = true;
+  if (xTaskCreatePinnedToCore(wakeWordTask, "wake-word", kWakeWordTaskStackWords, nullptr,
+                              kWakeWordTaskPriority, &wakeWordTaskHandle, 0) != pdPASS) {
+    wakeWordListeningEnabled = false;
+    ESP_LOGE("WAKE", "task creation failed");
+    return;
+  }
+  ESP_LOGI("WAKE", "task started core=0 priority=%u", static_cast<unsigned>(kWakeWordTaskPriority));
 }
 }  // namespace
 
@@ -6076,6 +6255,7 @@ void setup() {
   mcuAuthToken = prefs.getString("auth_token", "");
   selectedProfile = prefs.getString("last_profile", "");
   prefs.end();
+  loadActivePetCache();
   setOutputVolume(outputVolumePercent);
   initializeTouchButtons();
   setLcdStatus(LcdMode::Boot, F("BOOT"), F("WIFI ONLY"), 15);
@@ -6088,11 +6268,23 @@ void setup() {
   if (wifiReady && !setupApMode) {
     autoLoginSavedDevice();
   }
+  startWakeWordTask();
 }
 
 void loop() {
   if (restartPending && static_cast<int32_t>(millis() - restartAtMs) >= 0) {
     ESP.restart();
+  }
+
+  if (wakeWordDetectedPending) {
+    wakeWordDetectedPending = false;
+    wakeWordVoiceTurn = true;
+    triggerBootVoiceTurn(false);
+    wakeWordVoiceTurn = false;
+    if (wakeWordRecognizerData) wakeWordRecognizer->clean(wakeWordRecognizerData);
+    wakeWordSamples.clear();
+    wakeWordResamplePhase = 0;
+    ESP_LOGI("WAKE", "listener reset after voice turn");
   }
 
   server.handleClient();
@@ -6121,7 +6313,6 @@ void loop() {
   refreshLcd();
   handleBootButton();
   handleTouchButtons();
-  tickWakeWord();
   if (static_cast<int32_t>(millis() - nextMcuOtaCheckAtMs) >= 0) {
     McuOtaResult otaResult = checkMcuFirmwareUpdate(false);
     nextMcuOtaCheckAtMs = millis() + (otaResult == McuOtaResult::Failed ? kMcuOtaRetryMs : kMcuOtaIntervalMs);

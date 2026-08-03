@@ -14,11 +14,13 @@ const resolveEkkoProviderRuntimeConfigMock = vi.hoisted(() => vi.fn())
 const resolveModelProviderConfigsMock = vi.hoisted(() => vi.fn())
 const agentRunMock = vi.hoisted(() => vi.fn())
 const agentEstimateContextMock = vi.hoisted(() => vi.fn(async () => ({ contextTokens: 5_000 })))
-const agentWriteLogMock = vi.hoisted(() => vi.fn(() => true))
+const agentSessionWorkspaceDirectoryMock = vi.hoisted(() => (
+  vi.fn((sessionId: string) => `/tmp/ekko-workspace/default/${sessionId}`)
+))
 const getGlobalEkkoAgentMock = vi.hoisted(() => vi.fn(() => ({
   run: agentRunMock,
   estimateContext: agentEstimateContextMock,
-  writeLog: agentWriteLogMock,
+  sessionWorkspaceDirectory: agentSessionWorkspaceDirectoryMock,
 })))
 const buildCompressedHistoryMock = vi.hoisted(() => vi.fn())
 const recordSessionUsageMock = vi.hoisted(() => vi.fn())
@@ -335,6 +337,7 @@ describe('ekko-agent context usage events', () => {
       input: 'think carefully',
       coding_agent_id: 'ekko-agent',
       reasoning_effort: 'high',
+      instructions: 'Keep the spoken response short and use plain text.',
     }, 'default', sessionMap, vi.fn(() => false))
 
     expect(agentRunMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -344,6 +347,10 @@ describe('ekko-agent context usage events', () => {
         reasoningEffort: 'high',
         reasoningSummary: 'auto',
       }),
+      messages: expect.arrayContaining([{
+        role: 'system',
+        content: 'Keep the spoken response short and use plain text.',
+      }]),
     }))
   })
 
@@ -612,6 +619,7 @@ describe('ekko-agent context usage events', () => {
       session_id: 'session-1',
       input: 'run checks in the background',
       coding_agent_id: 'ekko-agent',
+      instructions: 'Keep the spoken response short and use plain text.',
       onEvent: (event: string, payload: any) => events.push({ event, payload }),
     }, 'default', sessionMap, dequeueNextQueuedRun)
 
@@ -713,6 +721,7 @@ describe('ekko-agent context usage events', () => {
       queue_id: 'ekko_subagent_child-background',
       displayInput: null,
       codingAgentId: 'ekko-agent',
+      instructions: 'Keep the spoken response short and use plain text.',
       autonomous: true,
       backgroundDelegationId: 'child-background',
     }))
@@ -898,6 +907,7 @@ describe('ekko-agent context usage events', () => {
       onEvent: (event: string, payload: any) => events.push({ event, payload }),
     }, 'default', sessionMap, vi.fn(() => false))
 
+    expect(agentSessionWorkspaceDirectoryMock).not.toHaveBeenCalled()
     expect(createSessionMock).toHaveBeenCalledWith(expect.objectContaining({
       id: 'session-1',
       agent: 'ekko-agent',
@@ -910,6 +920,126 @@ describe('ekko-agent context usage events', () => {
         event: 'session.workspace.updated',
         session_id: 'session-1',
         workspace: '/tmp/new-workspace',
+      },
+    })
+  })
+
+  it('keeps MCU Ekko sessions classified as global agent sessions', async () => {
+    getSessionMock.mockReturnValueOnce(null)
+    agentRunMock.mockResolvedValueOnce({
+      runId: 'run-1',
+      output: { role: 'assistant', content: 'done', usage: { inputTokens: 3, outputTokens: 2 } },
+      steps: [],
+      messages: [],
+      events: [],
+      contextEstimate: { contextTokens: 12_000 },
+    })
+    const { handleEkkoAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-ekko-agent-run')
+    const { nsp, socket, sessionMap } = makeHarness()
+
+    await handleEkkoAgentRun(nsp as any, socket as any, {
+      session_id: 'session-1',
+      input: 'hello from MCU',
+      source: 'coding_agent',
+      session_source: 'global_agent',
+      coding_agent_id: 'ekko-agent',
+    }, 'default', sessionMap, vi.fn(() => false))
+
+    expect(createSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'session-1',
+      source: 'global_agent',
+      agent: 'ekko-agent',
+      agent_mode: 'scoped',
+    }))
+  })
+
+  it('migrates an existing Hermes MCU session to Ekko metadata', async () => {
+    getSessionMock.mockReturnValue({
+      id: 'session-1',
+      profile: 'default',
+      source: 'global_agent',
+      agent: 'hermes',
+      agent_mode: '',
+      agent_session_id: '',
+      agent_native_session_id: '',
+      model: 'ekko-test-model',
+      provider: 'test-provider',
+      workspace: '/tmp/existing-mcu-workspace',
+    })
+    agentRunMock.mockResolvedValueOnce({
+      runId: 'run-1',
+      output: { role: 'assistant', content: 'done', usage: { inputTokens: 3, outputTokens: 2 } },
+      steps: [],
+      messages: [],
+      events: [],
+      contextEstimate: { contextTokens: 12_000 },
+    })
+    const { handleEkkoAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-ekko-agent-run')
+    const { nsp, socket, sessionMap } = makeHarness()
+
+    await handleEkkoAgentRun(nsp as any, socket as any, {
+      session_id: 'session-1',
+      input: 'continue on Ekko',
+      source: 'coding_agent',
+      session_source: 'global_agent',
+      coding_agent_id: 'ekko-agent',
+    }, 'default', sessionMap, vi.fn(() => false))
+
+    expect(createSessionMock).not.toHaveBeenCalled()
+    expect(updateSessionMock).toHaveBeenCalledWith('session-1', {
+      source: 'global_agent',
+      agent: 'ekko-agent',
+      agent_mode: 'scoped',
+      agent_session_id: '',
+      agent_native_session_id: '',
+    })
+    expect(agentRunMock).toHaveBeenCalledWith(expect.objectContaining({
+      toolContext: expect.objectContaining({
+        cwd: '/tmp/existing-mcu-workspace',
+        workspaceRoot: '/tmp/existing-mcu-workspace',
+      }),
+    }))
+  })
+
+  it('uses the profile-scoped Ekko session workspace by default', async () => {
+    getSessionMock.mockReturnValueOnce(null)
+    agentRunMock.mockResolvedValueOnce({
+      runId: 'run-1',
+      output: { role: 'assistant', content: 'done', usage: { inputTokens: 3, outputTokens: 2 } },
+      steps: [],
+      messages: [],
+      events: [],
+      contextEstimate: { contextTokens: 12_000 },
+    })
+    const { handleEkkoAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-ekko-agent-run')
+    const { nsp, socket, sessionMap, events } = makeHarness()
+
+    await handleEkkoAgentRun(nsp as any, socket as any, {
+      session_id: 'session-1',
+      input: 'create a file',
+      coding_agent_id: 'ekko-agent',
+      onEvent: (event: string, payload: any) => events.push({ event, payload }),
+    }, 'default', sessionMap, vi.fn(() => false))
+
+    const workspace = '/tmp/ekko-workspace/default/session-1'
+    expect(agentSessionWorkspaceDirectoryMock).toHaveBeenCalledWith('session-1')
+    expect(createSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'session-1',
+      agent: 'ekko-agent',
+      workspace,
+    }))
+    expect(agentRunMock).toHaveBeenCalledWith(expect.objectContaining({
+      toolContext: expect.objectContaining({
+        cwd: workspace,
+        workspaceRoot: workspace,
+      }),
+    }))
+    expect(events).toContainEqual({
+      event: 'session.workspace.updated',
+      payload: {
+        event: 'session.workspace.updated',
+        session_id: 'session-1',
+        workspace,
       },
     })
   })
@@ -1077,7 +1207,7 @@ describe('ekko-agent context usage events', () => {
     )
   })
 
-  it('writes structured model, tool, and run lifecycle events to the profile log', async () => {
+  it('passes only log correlation context into the internally logged runtime', async () => {
     agentRunMock.mockImplementationOnce(async (input: any) => {
       input.onEvent({ type: 'run.started', runId: 'run-log', maxSteps: 3 })
       input.onEvent({ type: 'model.started', runId: 'run-log', step: 1 })
@@ -1137,25 +1267,13 @@ describe('ekko-agent context usage events', () => {
       coding_agent_id: 'ekko-agent',
     }, 'default', sessionMap, vi.fn(() => false))
 
-    const records = agentWriteLogMock.mock.calls.map(call => call[0])
-    expect(records).toEqual(expect.arrayContaining([
-      expect.objectContaining({ category: 'run', event: 'run.requested', sessionId: 'session-1' }),
-      expect.objectContaining({ category: 'model', event: 'model.started', runId: 'run-log' }),
-      expect.objectContaining({ category: 'model', event: 'model.retry', level: 'warn', runId: 'run-log' }),
-      expect.objectContaining({
-        category: 'tool',
-        event: 'tool.started',
-        data: expect.objectContaining({ toolName: 'terminal_exec', arguments: { command: '/bin/sh', timeoutMs: 650_000 } }),
-      }),
-      expect.objectContaining({
-        category: 'tool',
-        event: 'tool.failed',
-        level: 'warn',
-        data: expect.objectContaining({ durationMs: 120_000, error: 'timed out' }),
-      }),
-      expect.objectContaining({ category: 'run', event: 'run.persisted', runId: 'run-log' }),
-    ]))
-    expect(records.some(record => record.event === 'model.delta')).toBe(false)
+    expect(agentRunMock).toHaveBeenCalledWith(expect.objectContaining({
+      logContext: {
+        profile: 'default',
+        sessionId: 'session-1',
+        turnId: expect.any(String),
+      },
+    }))
   })
 
   it('incrementally persists a completed tool group before an aborted run exits', async () => {
