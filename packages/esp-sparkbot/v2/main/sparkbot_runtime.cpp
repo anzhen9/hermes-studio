@@ -17,6 +17,8 @@
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_rom_sys.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mbedtls/base64.h"
 #include "esp_mn_iface.h"
 #include "esp_mn_models.h"
@@ -146,6 +148,8 @@ constexpr uint16_t kVolumeFeedbackFrequencyHz = 1000;
 constexpr uint16_t kVolumeFeedbackDurationMs = 500;
 constexpr uint16_t kVolumeFeedbackFadeMs = 8;
 constexpr int16_t kVolumeFeedbackAmplitude = 9000;
+constexpr uint32_t kWakeWordTaskStackWords = 4096;
+constexpr UBaseType_t kWakeWordTaskPriority = 3;
 constexpr i2s_port_t kI2sPort = I2S_NUM_0;
 
 // --- Color palette (RGB565) ---
@@ -235,6 +239,10 @@ bool mcuSessionClearAfterAudioInterrupt = false;
 bool voiceRecordHeardSpeech = false;
 bool wakeWordVoiceTurn = false;
 bool wakeWordReady = false;
+volatile bool wakeWordListeningEnabled = false;
+volatile bool wakeWordDetectedPending = false;
+volatile bool wakeWordTaskSampling = false;
+TaskHandle_t wakeWordTaskHandle = nullptr;
 srmodel_list_t *wakeWordModels = nullptr;
 esp_mn_iface_t *wakeWordRecognizer = nullptr;
 model_iface_data_t *wakeWordRecognizerData = nullptr;
@@ -312,6 +320,8 @@ void clearActivePetCache();
 bool refreshActivePetDisplay(bool force = false);
 bool refreshActivePetSprite(bool force = false);
 bool refreshPetState();
+void startWakeWordTask();
+void tickWakeWord();
 bool downloadAndApplyMcuFirmware(const String &url, const String &md5, int expectedSize);
 
 enum class McuOtaResult : uint8_t {
@@ -5235,6 +5245,17 @@ void handleVoiceTurnResponse(const String &interactionId, const String &response
 }
 
 void triggerBootVoiceTurn(bool touchTriggered) {
+  struct WakeWordListeningGuard {
+    WakeWordListeningGuard() {
+      wakeWordListeningEnabled = false;
+      uint32_t stoppedAt = millis() + 50;
+      while (wakeWordTaskSampling && static_cast<int32_t>(millis() - stoppedAt) < 0) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
+    }
+    ~WakeWordListeningGuard() { wakeWordListeningEnabled = wakeWordReady; }
+  } wakeWordListeningGuard;
+
   Serial.printf("Voice trigger wifi=%d status=%d activeUrl=%s token=%d profile=%s socket=%d audioBusy=%d playing=%d heap=%lu\n",
                 wifiReady ? 1 : 0, static_cast<int>(WiFi.status()), activeDeviceUrl.c_str(),
                 mcuAuthToken.length() > 0 ? 1 : 0, selectedProfile.c_str(), mcuSocketNamespaceReady ? 1 : 0,
@@ -6142,7 +6163,7 @@ void initializeWakeWord() {
 }
 
 void tickWakeWord() {
-  if (!wakeWordReady || audioBusy || mcuAudioPlaying || !wifiReady) return;
+  if (!wakeWordListeningEnabled || !wakeWordReady || audioBusy || mcuAudioPlaying || !wifiReady) return;
 
   constexpr size_t kReadBytes = 512;
   uint8_t readBuffer[kReadBytes];
@@ -6173,13 +6194,8 @@ void tickWakeWord() {
       wakeWordRecognizer->clean(wakeWordRecognizerData);
       wakeWordSamples.clear();
       wakeWordResamplePhase = 0;
-      wakeWordVoiceTurn = true;
-      triggerBootVoiceTurn(false);
-      wakeWordVoiceTurn = false;
-      wakeWordRecognizer->clean(wakeWordRecognizerData);
-      wakeWordSamples.clear();
-      wakeWordResamplePhase = 0;
-      ESP_LOGI("WAKE", "listener reset after voice turn");
+      wakeWordListeningEnabled = false;
+      wakeWordDetectedPending = true;
       return;
     }
     if (state == ESP_MN_STATE_TIMEOUT) wakeWordRecognizer->clean(wakeWordRecognizerData);
@@ -6189,6 +6205,29 @@ void tickWakeWord() {
     ESP_LOGI("WAKE", "feeding bytes=%u chunks=%lu buffered=%u", static_cast<unsigned>(bytesRead),
              static_cast<unsigned long>(wakeWordDetectedChunks), static_cast<unsigned>(wakeWordSamples.size()));
   }
+}
+
+void wakeWordTask(void *argument) {
+  for (;;) {
+    if (wakeWordListeningEnabled) {
+      wakeWordTaskSampling = true;
+      tickWakeWord();
+      wakeWordTaskSampling = false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+
+void startWakeWordTask() {
+  if (!wakeWordReady || wakeWordTaskHandle) return;
+  wakeWordListeningEnabled = true;
+  if (xTaskCreatePinnedToCore(wakeWordTask, "wake-word", kWakeWordTaskStackWords, nullptr,
+                              kWakeWordTaskPriority, &wakeWordTaskHandle, 0) != pdPASS) {
+    wakeWordListeningEnabled = false;
+    ESP_LOGE("WAKE", "task creation failed");
+    return;
+  }
+  ESP_LOGI("WAKE", "task started core=0 priority=%u", static_cast<unsigned>(kWakeWordTaskPriority));
 }
 }  // namespace
 
@@ -6229,11 +6268,23 @@ void setup() {
   if (wifiReady && !setupApMode) {
     autoLoginSavedDevice();
   }
+  startWakeWordTask();
 }
 
 void loop() {
   if (restartPending && static_cast<int32_t>(millis() - restartAtMs) >= 0) {
     ESP.restart();
+  }
+
+  if (wakeWordDetectedPending) {
+    wakeWordDetectedPending = false;
+    wakeWordVoiceTurn = true;
+    triggerBootVoiceTurn(false);
+    wakeWordVoiceTurn = false;
+    if (wakeWordRecognizerData) wakeWordRecognizer->clean(wakeWordRecognizerData);
+    wakeWordSamples.clear();
+    wakeWordResamplePhase = 0;
+    ESP_LOGI("WAKE", "listener reset after voice turn");
   }
 
   server.handleClient();
@@ -6262,7 +6313,6 @@ void loop() {
   refreshLcd();
   handleBootButton();
   handleTouchButtons();
-  tickWakeWord();
   if (static_cast<int32_t>(millis() - nextMcuOtaCheckAtMs) >= 0) {
     McuOtaResult otaResult = checkMcuFirmwareUpdate(false);
     nextMcuOtaCheckAtMs = millis() + (otaResult == McuOtaResult::Failed ? kMcuOtaRetryMs : kMcuOtaIntervalMs);
