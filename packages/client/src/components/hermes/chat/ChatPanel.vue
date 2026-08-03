@@ -109,7 +109,7 @@ const TOOL_PANEL_MIN_WIDTH = 360;
 const TOOL_PANEL_DEFAULT_WIDTH = 560;
 const TOOL_PANEL_STORAGE_KEY = "hermes.chat.toolPanelWidth";
 const toolPanelWidth = ref(loadToolPanelWidth());
-const toolResizeStart = ref<{ x: number; width: number } | null>(null);
+const toolResizeStart = ref<{ x: number; width: number; deltaSign: 1 | -1 } | null>(null);
 
 const currentMode = ref<"chat" | "live">("chat");
 
@@ -135,9 +135,12 @@ const pageSidebarExpanded = computed(
   () => !props.standalone && currentMode.value === "chat" && showSessions.value,
 );
 let mobileQuery: MediaQueryList | null = null;
-const isMobile = ref(false);
+const isMobile = ref(
+  typeof window !== "undefined" &&
+  window.matchMedia("(max-width: 768px)").matches,
+);
 const toolPanelStyle = computed(() => ({
-  width: isMobile.value ? "100%" : `${toolPanelWidth.value}px`,
+  width: isMobile.value ? "100%" : `min(${toolPanelWidth.value}px, 100%)`,
 }));
 
 function openRealtimeVoice() {
@@ -201,7 +204,7 @@ function handleToolPanelViewportResize() {
 function handleToolResizeMove(event: PointerEvent) {
   const start = toolResizeStart.value;
   if (!start) return;
-  const delta = start.x - event.clientX;
+  const delta = (event.clientX - start.x) * start.deltaSign;
   toolPanelWidth.value = clampToolPanelWidth(start.width + delta);
 }
 
@@ -223,6 +226,7 @@ function startToolResize(event: PointerEvent) {
   toolResizeStart.value = {
     x: event.clientX,
     width: toolPanelWidth.value,
+    deltaSign: document.documentElement.dir === "rtl" ? 1 : -1,
   };
   window.addEventListener("pointermove", handleToolResizeMove);
   window.addEventListener("pointerup", stopToolResize);
@@ -2694,20 +2698,29 @@ async function handleSessionModelCustomSubmit() {
                     :class="{ active: activeToolPanel === 'files' }"
                     type="button"
                     role="tab"
+                    :title="t('drawer.files')"
+                    :aria-label="t('drawer.files')"
                     :aria-selected="activeToolPanel === 'files'"
                     @click="activeToolPanel = 'files'"
                   >
-                    {{ t("drawer.files") }}
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z" />
+                    </svg>
                   </button>
                   <button
                     class="chat-tool-tab"
                     :class="{ active: activeToolPanel === 'terminal' }"
                     type="button"
                     role="tab"
+                    :title="t('drawer.terminal')"
+                    :aria-label="t('drawer.terminal')"
                     :aria-selected="activeToolPanel === 'terminal'"
                     @click="activeToolPanel = 'terminal'"
                   >
-                    {{ t("drawer.terminal") }}
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <rect x="3" y="4" width="18" height="16" rx="2" />
+                      <path d="m7 9 3 3-3 3M13 15h4" />
+                    </svg>
                   </button>
                   <button
                     v-if="desktopBrowserAvailable"
@@ -2715,10 +2728,17 @@ async function handleSessionModelCustomSubmit() {
                     :class="{ active: activeToolPanel === 'browser' }"
                     type="button"
                     role="tab"
+                    :title="t('browser.title')"
+                    :aria-label="t('browser.title')"
                     :aria-selected="activeToolPanel === 'browser'"
                     @click="activeToolPanel = 'browser'"
                   >
-                    {{ t("browser.title") }}
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <rect x="3" y="4" width="18" height="16" rx="2" />
+                      <path d="M3 9h18" />
+                      <circle cx="6.5" cy="6.5" r=".75" fill="currentColor" stroke="none" />
+                      <circle cx="9.5" cy="6.5" r=".75" fill="currentColor" stroke="none" />
+                    </svg>
                   </button>
                 </div>
                 <div class="chat-tool-content">
@@ -3518,6 +3538,8 @@ async function handleSessionModelCustomSubmit() {
   flex: 0 0 auto;
   min-width: 320px;
   max-width: 100%;
+  max-inline-size: 100%;
+  box-sizing: border-box;
   background: $bg-card;
   border-inline-start: 1px solid $border-color;
   display: flex;
@@ -3527,7 +3549,7 @@ async function handleSessionModelCustomSubmit() {
 
 .chat-tool-resize-handle {
   position: absolute;
-  left: -7px;
+  inset-inline-start: -7px;
   top: 0;
   bottom: 0;
   width: 14px;
@@ -3537,7 +3559,7 @@ async function handleSessionModelCustomSubmit() {
   &::after {
     content: "";
     position: absolute;
-    left: 6px;
+    inset-inline-start: 6px;
     top: 0;
     bottom: 0;
     width: 1px;
@@ -3551,7 +3573,7 @@ async function handleSessionModelCustomSubmit() {
   &::before {
     content: "";
     position: absolute;
-    left: 1px;
+    inset-inline-start: 1px;
     top: 50%;
     width: 12px;
     height: 38px;
@@ -3587,33 +3609,52 @@ async function handleSessionModelCustomSubmit() {
 
 .chat-tool-panel-inner {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   flex: 1;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  background: $bg-main-surface;
 }
 
 .chat-tool-tabs {
   display: flex;
+  flex-direction: column;
   align-items: center;
   flex-shrink: 0;
-  gap: 6px;
-  padding: 8px 10px;
-  border-bottom: 1px solid $border-color;
+  order: 2;
+  width: 48px;
+  height: 100%;
+  gap: 4px;
+  padding: 8px 6px;
+  border-inline-start: 1px solid $border-color;
+  background: $bg-sidebar-surface;
+  box-sizing: border-box;
 }
 
 .chat-tool-tab {
-  height: 30px;
-  padding: 0 12px;
+  position: relative;
+  width: 36px;
+  height: 36px;
+  padding: 0;
   border: none;
   border-radius: $radius-sm;
   background: transparent;
   color: $text-secondary;
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 500;
+  display: grid;
+  place-items: center;
   transition: all $transition-fast;
+
+  svg {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
 
   &:hover {
     color: $text-primary;
@@ -3623,14 +3664,27 @@ async function handleSessionModelCustomSubmit() {
   &.active {
     color: var(--accent-primary);
     background: rgba(var(--accent-primary-rgb), 0.12);
+
+    &::after {
+      content: "";
+      position: absolute;
+      right: -6px;
+      top: 9px;
+      bottom: 9px;
+      width: 2px;
+      border-radius: 2px 0 0 2px;
+      background: var(--accent-primary);
+    }
   }
 }
 
 .chat-tool-content {
+  order: 1;
   flex: 1;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  background: $bg-main-surface;
 }
 
 .chat-tool-content > * {
@@ -3647,7 +3701,10 @@ async function handleSessionModelCustomSubmit() {
     z-index: 70;
     left: 0;
     width: 100% !important;
+    max-width: 100vw !important;
+    max-inline-size: 100vw;
     min-width: 0;
+    box-sizing: border-box;
     border-inline-start: none;
     box-shadow: none;
   }

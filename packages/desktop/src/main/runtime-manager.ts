@@ -38,6 +38,7 @@ import {
   runtimeManifestMatchesHermesAgentVersion,
 } from './runtime-version'
 import { extractTarGzipArchive } from './runtime-archive'
+import { repairMovedHermesRuntime } from './runtime-relocation'
 import { t } from './desktop-i18n'
 
 const DEFAULT_RUNTIME_BASE_URL = 'https://download.ekkolearnai.com'
@@ -52,6 +53,12 @@ type RuntimeManifest = {
   schema: number
   platform: string
   hermesAgentVersion?: string
+  hermesSource?: {
+    repository?: string
+    ref?: string
+    commit?: string
+    installMethod?: string
+  }
   asset?: {
     name: string
     url?: string
@@ -74,6 +81,7 @@ type PackagedRuntimeRelease = {
 
 type ActiveRuntimeVersion = {
   schema?: number
+  desktopAppVersion?: string
   hermesRuntimeVersion?: string
   webUiVersion?: string
   runtimeDirectory?: string
@@ -104,18 +112,34 @@ function runtimeDownloadSource(source?: RuntimeDownloadSource): RuntimeDownloadS
 }
 
 function requiredRuntimeFiles(root: string): string[] {
-  const pythonBin = process.platform === 'win32'
-    ? join(root, 'python', 'python.exe')
-    : join(root, 'python', 'bin', 'python3')
+  const pythonRoot = runtimePythonEnvironmentRoot(root)
+  const pythonBin = runtimePythonExecutable(pythonRoot)
   const hermesBin = process.platform === 'win32'
-    ? join(root, 'python', 'Scripts', 'hermes.cmd')
-    : join(root, 'python', 'bin', 'hermes')
+    ? join(pythonRoot, 'Scripts', 'hermes.cmd')
+    : join(pythonRoot, 'bin', 'hermes')
   const nodeBin = process.platform === 'win32'
     ? join(root, 'node', 'node.exe')
     : join(root, 'node', 'bin', 'node')
   const files = [pythonBin, hermesBin, nodeBin, join(root, RUNTIME_MANIFEST_NAME)]
   if (process.platform === 'win32') files.push(join(root, 'git', 'cmd', 'git.exe'))
   return files
+}
+
+function runtimePythonEnvironmentRoot(runtimeRoot: string): string {
+  const sourceRoot = join(runtimeRoot, 'python')
+  const venvRoot = join(sourceRoot, 'venv')
+  const venvPythons = process.platform === 'win32'
+    ? [join(venvRoot, 'Scripts', 'python.exe'), join(venvRoot, 'python.exe')]
+    : [join(venvRoot, 'bin', 'python3')]
+  return venvPythons.some(existsSync) ? venvRoot : sourceRoot
+}
+
+function runtimePythonExecutable(environmentRoot: string): string {
+  if (process.platform !== 'win32') return join(environmentRoot, 'bin', 'python3')
+  const standardVenvPython = join(environmentRoot, 'Scripts', 'python.exe')
+  return existsSync(standardVenvPython)
+    ? standardVenvPython
+    : join(environmentRoot, 'python.exe')
 }
 
 function missingRuntimeFiles(root: string): string[] {
@@ -162,6 +186,25 @@ function validateRuntimeDirectory(root: string, label: string): void {
   if (manifest.platform && manifest.platform !== runtimePlatformKey()) {
     throw new Error(`Runtime platform mismatch: expected ${runtimePlatformKey()}, received ${manifest.platform}`)
   }
+  if (manifest.schema >= 2) {
+    const sourceFiles = [
+      join(root, 'python', '.git', 'HEAD'),
+      join(root, 'python', 'pyproject.toml'),
+    ]
+    const missingSourceFiles = sourceFiles.filter(file => !existsSync(file))
+    if (missingSourceFiles.length > 0) {
+      throw new Error(
+        `${label} is missing updateable Hermes source files: `
+        + missingSourceFiles.map(file => relative(root, file)).join(', '),
+      )
+    }
+    if (manifest.hermesSource?.installMethod !== 'git'
+      || !manifest.hermesSource.repository
+      || !manifest.hermesSource.ref
+      || !/^[0-9a-f]{40}$/i.test(manifest.hermesSource.commit || '')) {
+      throw new Error(`${label} has invalid Hermes Git source metadata`)
+    }
+  }
 }
 
 function runtimeDirectoryReadyForMigration(root: string): boolean {
@@ -178,9 +221,10 @@ function runtimeReady(): boolean {
 }
 
 function rootRuntimeReady(root: string): boolean {
+  const pythonRoot = runtimePythonEnvironmentRoot(root)
   const gitPath = process.platform === 'win32' ? join(root, 'git', 'cmd', 'git.exe') : null
-  return existsSync(process.platform === 'win32' ? join(root, 'python', 'python.exe') : join(root, 'python', 'bin', 'python3'))
-    && existsSync(process.platform === 'win32' ? join(root, 'python', 'Scripts', 'hermes.cmd') : join(root, 'python', 'bin', 'hermes'))
+  return existsSync(runtimePythonExecutable(pythonRoot))
+    && existsSync(process.platform === 'win32' ? join(pythonRoot, 'Scripts', 'hermes.cmd') : join(pythonRoot, 'bin', 'hermes'))
     && existsSync(process.platform === 'win32' ? join(root, 'node', 'node.exe') : join(root, 'node', 'bin', 'node'))
     && (!gitPath || existsSync(gitPath))
 }
@@ -434,6 +478,14 @@ export async function migratePendingRuntimeRoot(
       await mkdirAsync(dirname(targetRuntime), { recursive: true })
       await removeAsync(tempRuntime, { recursive: true, force: true })
       await copyAsync(sourceRuntime, tempRuntime, { recursive: true, force: true, verbatimSymlinks: true })
+      const relocation = repairMovedHermesRuntime(tempRuntime, sourceRuntime, targetRuntime)
+      if (relocation.editableFilesRewritten || relocation.launchersRewritten) {
+        console.log(
+          `[runtime] repaired migrated Hermes runtime: `
+          + `${relocation.editableFilesRewritten} editable reference(s), `
+          + `${relocation.launchersRewritten} launcher(s)`,
+        )
+      }
       validateRuntimeDirectory(tempRuntime, 'Migrated Runtime')
     }
 
@@ -513,6 +565,13 @@ export function writeActiveRuntimeVersion(runtimeRoot = desktopRuntimeDir()): vo
   const hermesRuntimeVersion = manifest?.hermesAgentVersion || desktopRuntimeVersion()
   const selectedWebUiDirectory = webuiDir()
   const active = readActiveRuntimeVersion()
+  const desktopAppVersion = app.getVersion().trim()
+  const previousDesktopAppVersion = active?.desktopAppVersion?.trim() || ''
+  const desktopAppVersionChanged = Boolean(
+    active
+    && desktopAppVersion
+    && previousDesktopAppVersion !== desktopAppVersion,
+  )
   const activeWebUiVersion = active?.webUiVersion?.trim().replace(/^v/, '') || ''
   const expectedWebUiDirectory = activeWebUiVersion
     ? join(runtimeStorageRoot(), 'webui', activeWebUiVersion)
@@ -523,12 +582,21 @@ export function writeActiveRuntimeVersion(runtimeRoot = desktopRuntimeDir()): vo
   const next: ActiveRuntimeVersion = {
     ...(active || {}),
     schema: 1,
+    desktopAppVersion,
     hermesRuntimeVersion,
     runtimeDirectory: runtimeRoot,
     platform: runtimePlatformKey(),
     updatedAt: new Date().toISOString(),
   }
-  if (hasWebUiOverride) {
+  if (desktopAppVersionChanged) {
+    delete next.webUiVersion
+    if (activeWebUiVersion) {
+      console.log(
+        `[runtime] desktop updated from ${previousDesktopAppVersion || 'a legacy version'} `
+        + `to ${desktopAppVersion}; using bundled Web UI`,
+      )
+    }
+  } else if (hasWebUiOverride) {
     // Development overrides are temporary and must not replace the persisted downloaded version.
   } else if (usingDownloadedWebUi) {
     next.webUiVersion = webUiVersion()
@@ -612,10 +680,8 @@ async function extractRuntimeArchive(archive: string, targetRoot: string): Promi
 
   try {
     await extractTarGzipArchive(archive, tempRoot)
-    const missing = missingRuntimeFiles(tempRoot)
-    if (missing.length > 0) {
-      throw new Error(`Runtime archive is missing required files: ${missing.map(file => relative(tempRoot, file)).join(', ')}`)
-    }
+    repairMovedHermesRuntime(tempRoot, tempRoot, targetRoot)
+    validateRuntimeDirectory(tempRoot, 'Runtime archive')
     rmSync(targetRoot, { recursive: true, force: true })
     mkdirSync(parent, { recursive: true })
     renameSync(tempRoot, targetRoot)

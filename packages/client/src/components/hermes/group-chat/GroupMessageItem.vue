@@ -213,7 +213,11 @@ const assistantWorkspaceChanges = computed(() => props.message.workspaceChanges 
 const selectedWorkspaceDiffFileId = computed(() => toolPanelStore.workspaceDiff?.file.id ?? null)
 const toolArgsPayload = computed(() => formatToolPayload(props.message.toolArgs))
 const toolResultPayload = computed(() => formatToolPayload(props.message.toolResult, true))
-const hasToolDetails = computed(() => !!(toolArgsPayload.value.full || toolResultPayload.value.full))
+const hasToolDetails = computed(() => !!(
+    props.message.reasoning?.trim()
+    || toolArgsPayload.value.full
+    || toolResultPayload.value.full
+))
 const fullToolArgs = computed(() => toolArgsPayload.value.full)
 const formattedToolArgs = computed(() => toolArgsPayload.value.display)
 const fullToolResult = computed(() => toolResultPayload.value.full)
@@ -616,6 +620,12 @@ onBeforeUnmount(() => {
                 <span v-if="message.toolStatus === 'error'" class="tool-error-badge">{{ t('chat.error') }}</span>
             </div>
             <div v-if="toolExpanded && hasToolDetails" class="tool-details" @click="handleToolDetailClick">
+                <div v-if="message.reasoning?.trim()" class="tool-detail-section">
+                    <div class="tool-detail-label">{{ t('chat.thinkingLabel') }}</div>
+                    <div class="tool-detail-reasoning">
+                        <MarkdownRenderer :content="message.reasoning" />
+                    </div>
+                </div>
                 <div v-if="formattedToolArgs" class="tool-detail-section" data-copy-source="tool-args">
                     <div class="tool-detail-label">{{ t('chat.arguments') }}</div>
                     <div class="tool-detail-code-block" v-html="renderedToolArgs"></div>
@@ -878,14 +888,14 @@ onBeforeUnmount(() => {
     padding: 0 4px;
     border-radius: 3px;
     line-height: 14px;
-    margin-left: 4px;
+    margin-inline-start: 4px;
 }
 
 .tool-details {
-    margin-left: 16px;
+    margin-inline-start: 16px;
     margin-top: 2px;
-    border-left: 2px solid $border-light;
-    padding-left: 10px;
+    border-inline-start: 2px solid $border-light;
+    padding-inline-start: 10px;
 }
 
 .assistant-workspace-change {
@@ -920,6 +930,25 @@ onBeforeUnmount(() => {
         overflow-y: auto;
         white-space: pre-wrap;
         word-break: break-word;
+    }
+}
+
+.tool-detail-reasoning {
+    max-height: 300px;
+    overflow-y: auto;
+    padding: 8px 10px;
+    border: 1px solid $border-light;
+    border-radius: $radius-sm;
+    background: rgba(var(--text-primary-rgb), 0.035);
+    color: $text-secondary;
+    font-size: 12px;
+
+    :deep(.markdown-body > :first-child) {
+        margin-top: 0;
+    }
+
+    :deep(.markdown-body > :last-child) {
+        margin-bottom: 0;
     }
 }
 
@@ -1243,7 +1272,7 @@ onBeforeUnmount(() => {
     .thinking-body {
         margin-top: 6px;
         padding: 6px 10px;
-        border-left: 2px solid $border-light;
+        border-inline-start: 2px solid $border-light;
         font-size: 13px;
         opacity: 0.85;
         font-style: italic;

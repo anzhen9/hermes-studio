@@ -10,8 +10,6 @@ import {
   type ModelClient,
   type ModelEvent,
   type AgentRuntimeEvent,
-  type EkkoLogCategory,
-  type EkkoLogLevel,
   type ModelProviderConfig,
   type ModelReasoningEffort,
   type ModelRequest,
@@ -32,7 +30,6 @@ import {
 import type { ChatMessage } from '../../../lib/context-compressor'
 import { logger } from '../../logger'
 import { recordSessionUsage } from '../../usage-recorder'
-import { getProfileDir } from '../hermes-profile'
 import { observeRunChatPetEvent } from '../pet-state-socket'
 import { contentBlocksToString, convertContentBlocksForAgent, extractTextForPreview } from './content-blocks'
 import { buildCompressedHistory, getOrCreateSession } from './compression'
@@ -51,12 +48,14 @@ export interface EkkoAgentRunSocketData {
   provider?: string
   model?: string
   model_groups?: RunModelGroup[]
+  instructions?: string
   coding_agent_id?: ChatCodingAgentId
   agent_id?: ChatCodingAgentId
   mode?: 'scoped' | 'global'
   workspace?: string | null
   category_id?: number | null
   source?: string
+  session_source?: 'global_agent' | 'workflow'
   baseUrl?: string
   base_url?: string
   apiKey?: string
@@ -335,6 +334,7 @@ function createProviderModelClient(
     provider: client.provider,
     requestStyle: client.requestStyle,
     capabilities: client.capabilities,
+    requestTarget: request => client.requestTarget?.(request) || '',
     async create(request: ModelRequest): Promise<ModelResponse> {
       try {
         return await client.create(request)
@@ -421,7 +421,8 @@ export async function handleEkkoAgentRun(
   const apiMode = runtimeConfig.apiMode
   const apiKey = runtimeConfig.apiKey
   const reasoningEffort = resolveReasoningEffort(data.reasoning_effort)
-  const workspace = data.workspace || storedSession?.workspace || getProfileDir(profile)
+  const agent = getGlobalEkkoAgent(profile)
+  const workspace = data.workspace || storedSession?.workspace || agent.sessionWorkspaceDirectory(sessionId)
   const shouldEmitWorkspaceUpdate = Boolean(workspace && !storedSession?.workspace)
   if (storedSession && !storedSession.workspace) updateSession(sessionId, { workspace })
   const displayInput = data.display_input === undefined ? data.input : data.display_input
@@ -430,6 +431,15 @@ export async function handleEkkoAgentRun(
   const storageText = data.storage_message !== undefined ? data.storage_message : displayText
   const shouldPersistUserMessage = !skipUserMessage && displayInput !== null
   const now = Math.floor(Date.now() / 1000)
+  const instructions = String(data.instructions || '').trim()
+  const instructionMessages: AgentMessage[] = instructions
+    ? [{ role: 'system', content: instructions }]
+    : []
+  const sessionSource = data.session_source === 'global_agent'
+    ? 'global_agent'
+    : data.session_source === 'workflow' || data.source === 'workflow'
+      ? 'workflow'
+      : 'coding_agent'
   const emit = (event: string, payload: any) => {
     const tagged = { ...payload, session_id: sessionId }
     observeRunChatPetEvent(profile, event, tagged)
@@ -447,7 +457,7 @@ export async function handleEkkoAgentRun(
     createSession({
       id: sessionId,
       profile,
-      source: 'coding_agent',
+      source: sessionSource,
       agent: 'ekko-agent',
       agent_mode: 'scoped',
       model: modelConfig.model,
@@ -456,6 +466,20 @@ export async function handleEkkoAgentRun(
       title,
       workspace,
       category_id: data.category_id,
+    })
+  } else if (
+    storedSession.source !== sessionSource ||
+    storedSession.agent !== 'ekko-agent' ||
+    storedSession.agent_mode !== 'scoped' ||
+    storedSession.agent_session_id ||
+    storedSession.agent_native_session_id
+  ) {
+    updateSession(sessionId, {
+      source: sessionSource,
+      agent: 'ekko-agent',
+      agent_mode: 'scoped',
+      agent_session_id: '',
+      agent_native_session_id: '',
     })
   }
   if (storedSession && apiMode && storedSession.api_mode !== apiMode) {
@@ -526,7 +550,6 @@ export async function handleEkkoAgentRun(
         }
       : undefined,
   })
-  const agent = getGlobalEkkoAgent(profile)
   const memoryUsageBatchId = randomUUID()
   const skillReviewUsageBatchId = randomUUID()
   const turnId = randomUUID()
@@ -545,7 +568,6 @@ export async function handleEkkoAgentRun(
   let usageCallIndex = 0
   let contextEstimate: any
   let parentUsagePersisted = false
-  const modelStepStartedAt = new Map<number, number>()
   const pendingToolGroups = new Map<string, PendingToolGroup>()
   const toolCallGroupKeys = new Map<string, string>()
   const persistedToolCallIds = new Set<string>()
@@ -623,9 +645,11 @@ export async function handleEkkoAgentRun(
       storageMessage: continuationMessage,
       model: modelConfig.model,
       provider: modelConfig.provider,
+      instructions,
       profile,
       workspace,
       source: state.source,
+      sessionSource: data.session_source,
       codingAgentId: 'ekko-agent',
       mode: data.mode,
       baseUrl,
@@ -672,23 +696,6 @@ export async function handleEkkoAgentRun(
     } catch (err) {
       logger.warn(err, '[chat-run-socket] failed to persist Ekko subagent display state for session %s', sessionId)
     }
-  }
-  const writeRunLog = (
-    category: EkkoLogCategory,
-    event: string,
-    data?: unknown,
-    level: EkkoLogLevel = 'info',
-    eventRunId = runId,
-  ) => {
-    agent.writeLog({
-      category,
-      event,
-      level,
-      sessionId,
-      runId: eventRunId || undefined,
-      turnId,
-      data,
-    })
   }
   const toolGroupKey = (eventRunId: string, step: number) => `${eventRunId}:${step}`
   const scopedToolCallId = (eventRunId: string, toolCallId: string) => `${eventRunId}:${toolCallId}`
@@ -759,11 +766,6 @@ export async function handleEkkoAgentRun(
         }
       }
       pendingToolGroups.delete(toolGroupKey(group.runId, group.step))
-      writeRunLog('run', 'run.tool_group_persisted', {
-        step: group.step,
-        toolCallIds: toolCalls.map(call => call.id),
-        toolNames: toolCalls.map(call => call.name),
-      }, 'debug', group.runId)
       return true
     } catch (err) {
       logger.warn(err, '[chat-run-socket] failed to incrementally persist Ekko tool group for session %s', sessionId)
@@ -783,182 +785,8 @@ export async function handleEkkoAgentRun(
     group.results.set(toolCallId, { toolName, result })
     persistCompletedToolGroup(group)
   }
-  const logRuntimeEvent = (event: AgentRuntimeEvent) => {
-    const eventRunId = event.runId
-    if (event.type === 'model.delta' || event.type === 'model.reasoning') return
-    if (event.type === 'model.started') {
-      modelStepStartedAt.set(event.step, Date.now())
-      writeRunLog('model', event.type, { step: event.step }, 'info', eventRunId)
-      return
-    }
-    if (event.type === 'model.retry') {
-      const startedAt = modelStepStartedAt.get(event.step)
-      writeRunLog('model', event.type, {
-        step: event.step,
-        retry: event.retry,
-        maxRetries: event.maxRetries,
-        durationMs: startedAt == null ? undefined : Date.now() - startedAt,
-        error: event.error,
-      }, 'warn', eventRunId)
-      modelStepStartedAt.set(event.step, Date.now())
-      return
-    }
-    if (event.type === 'model.message') {
-      const startedAt = modelStepStartedAt.get(event.step)
-      modelStepStartedAt.delete(event.step)
-      writeRunLog('model', event.type, {
-        step: event.step,
-        durationMs: startedAt == null ? undefined : Date.now() - startedAt,
-        id: event.message.id,
-        model: event.message.model,
-        finishReason: event.message.finishReason,
-        contentChars: event.message.content.length,
-        reasoningChars: event.message.reasoning?.length || 0,
-        toolCalls: event.message.toolCalls?.map(call => ({
-          id: call.id,
-          name: call.name,
-          arguments: call.arguments,
-        })) || [],
-      }, 'info', eventRunId)
-      return
-    }
-    if (event.type === 'model.tool_call') {
-      writeRunLog('model', event.type, {
-        step: event.step,
-        toolCall: {
-          id: event.toolCall.id,
-          name: event.toolCall.name,
-          arguments: event.toolCall.arguments,
-        },
-      }, 'info', eventRunId)
-      return
-    }
-    if (event.type === 'model.usage') {
-      writeRunLog('model', event.type, { step: event.step, usage: event.usage }, 'debug', eventRunId)
-      return
-    }
-    if (event.type === 'model.context') {
-      writeRunLog('context', event.type, { step: event.step, context: event.context }, 'debug', eventRunId)
-      return
-    }
-    if (event.type === 'context.estimated') {
-      writeRunLog('context', event.type, { step: event.step, estimate: event.estimate }, 'debug', eventRunId)
-      return
-    }
-    if (event.type === 'tool.started') {
-      writeRunLog(toolLogCategory(event.toolName), event.type, {
-        step: event.step,
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        arguments: event.arguments,
-      }, 'info', eventRunId)
-      return
-    }
-    if (event.type === 'tool.completed' || event.type === 'tool.failed') {
-      writeRunLog(toolLogCategory(event.toolName), event.type, {
-        step: event.step,
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        durationMs: event.durationMs,
-        ok: event.result.ok,
-        error: event.result.error,
-        contentChars: event.result.content.length,
-        contentPreview: logPreview(event.result.content),
-      }, event.type === 'tool.failed' ? 'warn' : 'info', eventRunId)
-      return
-    }
-    if (event.type === 'memory.retrieved') {
-      writeRunLog('memory', event.type, {
-        diagnostics: event.diagnostics,
-        memoryIds: event.memoryIds,
-      }, 'debug', eventRunId)
-      return
-    }
-    if (
-      event.type === 'skill.review.started' ||
-      event.type === 'skill.review.completed' ||
-      event.type === 'skill.review.failed'
-    ) {
-      writeRunLog('skill', event.type, {
-        reviewId: event.reviewId,
-        ...('mutations' in event ? { mutations: event.mutations } : {}),
-        ...('error' in event ? { error: event.error } : {}),
-      }, event.type === 'skill.review.failed' ? 'warn' : 'info', eventRunId)
-      return
-    }
-    if (
-      event.type === 'subagent.start' ||
-      event.type === 'subagent.text' ||
-      event.type === 'subagent.thinking' ||
-      event.type === 'subagent.tool' ||
-      event.type === 'subagent.complete'
-    ) {
-      writeRunLog('run', event.type, {
-        subagentId: event.subagentId,
-        ...('childRunId' in event ? { childRunId: event.childRunId } : {}),
-        goal: event.goal,
-        background: event.background,
-        ...('text' in event ? { textChars: event.text.length, textPreview: logPreview(event.text) } : {}),
-        ...('toolName' in event ? {
-          toolName: event.toolName,
-          arguments: event.arguments,
-          toolCount: event.toolCount,
-        } : {}),
-        ...('status' in event ? {
-          status: event.status,
-          summary: event.summary,
-          durationMs: event.durationMs,
-          toolCount: event.toolCount,
-          apiCalls: event.apiCalls,
-          inputTokens: event.inputTokens,
-          outputTokens: event.outputTokens,
-          cacheReadTokens: event.cacheReadTokens,
-          cacheWriteTokens: event.cacheWriteTokens,
-          reasoningTokens: event.reasoningTokens,
-        } : {}),
-      }, event.type === 'subagent.complete' && event.status !== 'completed' ? 'warn' : 'info', eventRunId)
-      return
-    }
-    if (event.type === 'run.started') {
-      writeRunLog('run', event.type, { maxSteps: event.maxSteps }, 'info', eventRunId)
-      return
-    }
-    if (event.type === 'run.completed') {
-      writeRunLog('run', event.type, {
-        steps: event.steps,
-        finishReason: event.output.finishReason,
-        outputChars: event.output.content.length,
-        outputPreview: logPreview(event.output.content),
-        contextEstimate: event.contextEstimate,
-      }, 'info', eventRunId)
-      return
-    }
-    if (event.type === 'run.failed') {
-      writeRunLog('run', event.type, { steps: event.steps, error: event.error }, 'error', eventRunId)
-      return
-    }
-    if (event.type === 'run.tool_failure_limit') {
-      writeRunLog('run', event.type, { failures: event.failures }, 'warn', eventRunId)
-      return
-    }
-    if (event.type === 'run.max_steps') {
-      writeRunLog('run', event.type, { maxSteps: event.maxSteps }, 'warn', eventRunId)
-    }
-  }
-  writeRunLog('run', 'run.requested', {
-    model: modelConfig.model,
-    provider: modelConfig.provider,
-    requestStyle: providerConfig.requestStyle,
-    workspace,
-    inputChars: inputText.length,
-    currentInputTokens,
-    queueId: data.queue_id,
-    reasoningEffort,
-    reasoningSummary: 'auto',
-  })
   const handleRuntimeEvent = (event: AgentRuntimeEvent) => {
     if ('runId' in event) runId = event.runId
-    logRuntimeEvent(event)
     if (event.type === 'run.started') {
       startWorkspaceRunDiff(event.runId)
       state.runId = event.runId
@@ -1323,7 +1151,7 @@ export async function handleEkkoAgentRun(
           modelClient,
           model: modelConfig.model,
           modelDefaults: { model: modelConfig.model },
-          messages: [],
+          messages: instructionMessages,
           signal: abortController.signal,
           memoryEnabled: false,
           toolContext,
@@ -1334,11 +1162,6 @@ export async function handleEkkoAgentRun(
       currentInputTokens,
       shouldPersistUserMessage && data.display_role !== 'command',
     )
-    writeRunLog('context', 'context.history_prepared', {
-      historyMessages: compressedHistory.length,
-      currentInputTokens,
-      contextTokens: contextEstimate?.contextTokens,
-    }, 'debug')
     const currentMessage: AgentMessage = {
       role: 'user',
       ...await toUserAgentContent(data.input),
@@ -1354,13 +1177,18 @@ export async function handleEkkoAgentRun(
         reasoningSummary: 'auto',
       },
       messages: [
+        ...instructionMessages,
         ...await toAgentMessages(compressedHistory),
         currentMessage,
       ],
       signal: abortController.signal,
+      logContext: {
+        profile,
+        sessionId,
+        turnId,
+      },
       onEvent: handleRuntimeEvent,
       onMemoryUsage: event => {
-        writeRunLog('memory', 'memory.model_usage', event, 'debug')
         recordSessionUsage({
           sessionId,
           runId: `memory-summary:${memoryUsageBatchId}:call:${event.callIndex}`,
@@ -1377,7 +1205,6 @@ export async function handleEkkoAgentRun(
         })
       },
       onSkillReviewUsage: event => {
-        writeRunLog('skill', 'skill.review.model_usage', event, 'debug')
         recordSessionUsage({
           sessionId,
           runId: `skill-review:${skillReviewUsageBatchId}:call:${event.callIndex}`,
@@ -1458,7 +1285,6 @@ export async function handleEkkoAgentRun(
     const hadToolActivity = result.steps.some(step => step.type === 'tool')
     if (!assistantText.trim() && !assistantReasoning.trim() && !hadToolActivity) {
       const error = 'Model provider returned an empty response after streaming and non-streaming attempts.'
-      writeRunLog('run', 'run.empty_response', { error }, 'error', result.runId)
       logger.warn({
         session_id: sessionId,
         provider_config: redactProviderConfig(providerConfig),
@@ -1562,23 +1388,13 @@ export async function handleEkkoAgentRun(
       delegation_id: data.background_delegation_id,
       workspace_run_change: workspaceRunChange,
     })
-    writeRunLog('run', 'run.persisted', {
-      inputTokens: usageInput,
-      outputTokens: usageOutput,
-      contextTokens: contextEstimate?.contextTokens,
-      queueRemaining: state.queue.length,
-    }, 'info', result.runId)
   } catch (err) {
     if (abortController.signal.aborted || isAbortError(err)) {
-      writeRunLog('run', 'run.aborted', {
-        error: err instanceof Error ? err.message : String(err),
-      }, 'warn')
       logger.info('[chat-run-socket] ekko-agent run aborted for session %s', sessionId)
       completeWorkspaceRunDiff()
       return
     }
     const error = err instanceof Error ? err.message : String(err)
-    writeRunLog('run', 'run.handler_failed', { error, exception: err }, 'error')
     logger.warn(err, '[chat-run-socket] ekko-agent run failed for session %s', sessionId)
     if (state.queue.length === 0) {
       try {
@@ -1602,10 +1418,6 @@ export async function handleEkkoAgentRun(
       workspace_run_change: completeWorkspaceRunDiff(),
     })
   } finally {
-    writeRunLog('run', 'run.released', {
-      aborted: abortController.signal.aborted,
-      queueRemaining: state.queue.length,
-    }, 'debug')
     if (!abortController.signal.aborted || state.abortController === abortController) {
       state.isWorking = false
       state.isAborting = false
@@ -1624,16 +1436,4 @@ export async function handleEkkoAgentRun(
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.message === 'Run aborted.')
-}
-
-function logPreview(value: string, maxChars = 4_000): string {
-  return value.length <= maxChars
-    ? value
-    : `${value.slice(0, maxChars)}…[truncated ${value.length - maxChars} chars]`
-}
-
-function toolLogCategory(toolName: string): EkkoLogCategory {
-  if (toolName.startsWith('skill_')) return 'skill'
-  if (toolName.startsWith('memory_')) return 'memory'
-  return 'tool'
 }
