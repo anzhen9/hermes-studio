@@ -11,6 +11,7 @@ import { getChatRunServer } from '../../routes/hermes/chat-run'
 import { transcodeToPcmS16le } from '../hermes/stt-providers/audio-convert'
 import { decodeMcuImaAdpcm, encodeMcuImaAdpcm } from '../hermes/mcu-adpcm'
 import { MCU_TTS_SAMPLE_RATE, mcuPromptText, mcuPromptUrl } from '../hermes/mcu-prompts'
+import { matchMcuChassisCommand } from './mcu-chassis-command'
 import { createMcuSpeechSegmenter, normalizeMcuSpeechText } from './mcu-speech-segmenter'
 import { MCU_VOICE_SYSTEM_INSTRUCTIONS } from './mcu-voice-instructions'
 import type {
@@ -152,6 +153,12 @@ interface LocalSocketBridge {
 interface McuVoiceChatTurnOptions {
   userToken: string
   profile: string
+  interactionId: string
+  transcript: string
+  clientId?: string
+}
+
+interface McuDirectCommandDispatch {
   interactionId: string
   transcript: string
   clientId?: string
@@ -497,7 +504,9 @@ export class GlobalAgentServer {
     if (!expected) return false
     for (const socket of this.clients.values()) {
       const auth = socket.handshake.auth || {}
-      const raw = typeof auth.deviceCode === 'string'
+      const raw = typeof socket.data.mcuDeviceCode === 'string' && String(socket.data.mcuDeviceCode).trim()
+        ? String(socket.data.mcuDeviceCode)
+        : typeof auth.deviceCode === 'string'
         ? auth.deviceCode
         : typeof auth.device_code === 'string'
           ? auth.device_code
@@ -560,14 +569,23 @@ export class GlobalAgentServer {
   }
 
   startMcuVoiceChatTurn(options: McuVoiceChatTurnOptions): void {
-    const sessionId = this.mcuSessionId(options.clientId, options.profile)
-    const primaryQueueId = `mcu_${randomUUID()}`
     this.emitMcuEvent({
       type: 'interaction.status',
       interactionId: options.interactionId,
       status: 'thinking',
       text: options.transcript,
     }, { clientId: options.clientId })
+
+    if (this.dispatchDirectMcuChassisCommand({
+      interactionId: options.interactionId,
+      transcript: options.transcript,
+      clientId: options.clientId,
+    })) {
+      return
+    }
+
+    const sessionId = this.mcuSessionId(options.clientId, options.profile)
+    const primaryQueueId = `mcu_${randomUUID()}`
 
     const socket: ClientSocket = createClientSocket(`${this.localBaseUrl}/chat-run`, {
       auth: { token: options.userToken },
@@ -913,6 +931,37 @@ export class GlobalAgentServer {
       if (!currentRunPrimary) return
       fail('clarification required')
     })
+  }
+
+  private dispatchDirectMcuChassisCommand(options: McuDirectCommandDispatch): boolean {
+    const matched = matchMcuChassisCommand(options.transcript)
+    if (!matched) return false
+
+    logger.info({
+      interactionId: options.interactionId,
+      tool: matched.tool,
+      transcript: options.transcript,
+      clientId: options.clientId,
+    }, '[global-agent] dispatching MCU chassis command from transcript')
+
+    this.emitMcuEvent({
+      type: 'tool.started',
+      interactionId: options.interactionId,
+      tool: matched.tool,
+      preview: matched.preview,
+    }, { clientId: options.clientId })
+    this.emitMcuEvent({
+      type: 'tool.completed',
+      interactionId: options.interactionId,
+      tool: matched.tool,
+      preview: matched.preview,
+    }, { clientId: options.clientId })
+    this.emitMcuEvent({
+      type: 'interaction.status',
+      interactionId: options.interactionId,
+      status: 'completed',
+    }, { clientId: options.clientId })
+    return true
   }
 
   private queueMcuBackgroundSpeech(sessionId: string, item: PendingMcuBackgroundSpeech): void {
@@ -1428,8 +1477,22 @@ export class GlobalAgentServer {
       ? { ...payload, type: typeof payload.type === 'string' && payload.type ? payload.type : event }
       : { type: event, payload }
     if (!this.authorizeMcuEvent(clientId, event, body)) return
+    this.captureMcuDeviceCode(clientId, body)
     this.handleMcuClientEvent(clientId, event, body)
     this.emitFrontendBridgeEvent(clientId, this.redactMcuAuthPayload(body))
+  }
+
+  private captureMcuDeviceCode(clientId: string, payload: Record<string, unknown>): void {
+    const socket = this.clients.get(clientId)
+    if (!socket) return
+    const raw = typeof payload.deviceCode === 'string'
+      ? payload.deviceCode
+      : typeof payload.device_code === 'string'
+        ? payload.device_code
+        : ''
+    const normalized = raw.trim()
+    if (!normalized) return
+    socket.data.mcuDeviceCode = normalized
   }
 
   private mcuSessionId(clientId: string | undefined, profile: string): string {

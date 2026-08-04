@@ -12,6 +12,7 @@
 #include <memory>
 #include <vector>
 #include "driver/i2s.h"
+#include "driver/uart.h"
 #include "esp_crc.h"
 #include "esp_log.h"
 #include "esp_partition.h"
@@ -66,6 +67,12 @@ constexpr int kPinLcdBl = 46;
 constexpr int kPinTouchAction = 1;
 constexpr int kPinTouchVolumeDown = 2;
 constexpr int kPinTouchVolumeUp = 3;
+// Tank base UART pins follow the xiaozhi esp-sparkbot board wiring.
+constexpr uart_port_t kChassisUartPort = UART_NUM_1;
+constexpr int kPinChassisUartTx = 38;
+constexpr int kPinChassisUartRx = 48;
+constexpr uint32_t kChassisUartBaudRate = 115200;
+constexpr size_t kChassisUartBufferBytes = 1024;
 
 constexpr uint8_t kEs8311Addr = 0x18;
 constexpr int kLcdWidth = 240;
@@ -183,6 +190,7 @@ bool mcuSocketConnected = false;
 bool mcuSocketNamespaceReady = false;
 bool restartPending = false;
 bool audioBusy = false;
+bool chassisUartReady = false;
 bool paEnabled = false;
 bool i2sReady = false;
 uint32_t i2sSampleRate = kVoiceInputSampleRate;
@@ -200,6 +208,7 @@ uint32_t restartAtMs = 0;
 uint32_t lastLanDiscoveryAtMs = 0;
 uint32_t lastMcuLoginAtMs = 0;
 uint32_t lastMcuSocketConnectAtMs = 0;
+uint8_t chassisLightMode = 2;
 uint32_t lastBootButtonAtMs = 0;
 uint32_t bootPressedAtMs = 0;
 uint32_t bootClickPendingAtMs = 0;
@@ -313,6 +322,8 @@ void disconnectMcuSocketClient();
 void connectMcuSocketClient();
 void mcuSocketLoop();
 void refreshLcd(bool force = false);
+void initializeChassisUart();
+void executeChassisTool(const String &tool, const String &preview);
 bool waitForMcuSocketReady(uint32_t timeoutMs);
 void enqueueNoDevicePrompt(const String &interactionId);
 String activeDeviceEndpoint(const __FlashStringHelper *path);
@@ -446,6 +457,95 @@ uint8_t clampUiValue(uint32_t value, uint8_t ceiling) {
 bool i2cProbe(uint8_t address) {
   Wire.beginTransmission(address);
   return Wire.endTransmission() == 0;
+}
+
+void initializeChassisUart() {
+  if (chassisUartReady) return;
+  uart_config_t config = {};
+  config.baud_rate = kChassisUartBaudRate;
+  config.data_bits = UART_DATA_8_BITS;
+  config.parity = UART_PARITY_DISABLE;
+  config.stop_bits = UART_STOP_BITS_1;
+  config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+  config.source_clk = UART_SCLK_DEFAULT;
+
+  esp_err_t install = uart_driver_install(kChassisUartPort, kChassisUartBufferBytes * 2, 0, 0, nullptr, 0);
+  esp_err_t param = install == ESP_OK ? uart_param_config(kChassisUartPort, &config) : install;
+  esp_err_t pins = param == ESP_OK
+      ? uart_set_pin(kChassisUartPort, kPinChassisUartTx, kPinChassisUartRx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE)
+      : param;
+  if (pins != ESP_OK) {
+    Serial.printf("Chassis UART init failed install=%d param=%d pins=%d\n",
+                  static_cast<int>(install), static_cast<int>(param), static_cast<int>(pins));
+    return;
+  }
+
+  chassisUartReady = true;
+  const char *bootCommand = "w2";
+  uart_write_bytes(kChassisUartPort, bootCommand, strlen(bootCommand));
+  Serial.printf("Chassis UART ready tx=%d rx=%d baud=%lu\n",
+                kPinChassisUartTx, kPinChassisUartRx, static_cast<unsigned long>(kChassisUartBaudRate));
+}
+
+void sendChassisCommand(const char *command) {
+  if (!command || !chassisUartReady) return;
+  uart_write_bytes(kChassisUartPort, command, strlen(command));
+  Serial.printf("Chassis command sent: %s\n", command);
+}
+
+bool resolveChassisLightMode(const String &preview, uint8_t *modeOut) {
+  if (!modeOut) return false;
+  for (size_t index = 0; index < preview.length(); ++index) {
+    char c = preview[index];
+    if (c < '0' || c > '9') continue;
+    uint8_t raw = static_cast<uint8_t>(c - '0');
+    if (raw >= 1 && raw <= 6) {
+      *modeOut = static_cast<uint8_t>(raw + 1);
+      return true;
+    }
+    if (raw >= 2 && raw <= 8) {
+      *modeOut = raw;
+      return true;
+    }
+  }
+  return false;
+}
+
+void executeChassisTool(const String &tool, const String &preview) {
+  if (!chassisUartReady || tool.length() == 0) return;
+
+  if (tool == F("self.chassis.go_forward") || tool == F("前进")) {
+    sendChassisCommand("x0.0 y1.0");
+    return;
+  }
+  if (tool == F("self.chassis.go_back") || tool == F("后退")) {
+    sendChassisCommand("x0.0 y-1.0");
+    return;
+  }
+  if (tool == F("self.chassis.turn_left") || tool == F("向左转") || tool == F("左转")) {
+    sendChassisCommand("x-1.0 y0.0");
+    return;
+  }
+  if (tool == F("self.chassis.turn_right") || tool == F("向右转") || tool == F("右转")) {
+    sendChassisCommand("x1.0 y0.0");
+    return;
+  }
+  if (tool == F("self.chassis.dance") || tool == F("跳舞")) {
+    sendChassisCommand("d1");
+    return;
+  }
+  if (tool == F("self.chassis.switch_light_mode") || tool == F("打开灯光效果") || tool == F("灯光")) {
+    uint8_t mode = 0;
+    if (!resolveChassisLightMode(preview, &mode)) {
+      mode = chassisLightMode >= 7 ? 2 : static_cast<uint8_t>(chassisLightMode + 1);
+    }
+    if (mode >= 2 && mode <= 8) {
+      char command[3] = {'w', static_cast<char>('0' + mode), '\0'};
+      chassisLightMode = mode;
+      sendChassisCommand(command);
+    }
+    return;
+  }
 }
 
 String hexByte(uint8_t value) {
@@ -4048,6 +4148,7 @@ void handleMcuToolEvent(uint8_t clientId, const String &message, const String &t
   if (mcuToolName.length() == 0) mcuToolName = jsonStringValue(message, F("name"));
   if (mcuToolName.length() == 0) mcuToolName = F("tool");
   mcuToolPreview = jsonStringValue(message, F("preview"));
+  if (type == F("tool.started")) executeChassisTool(mcuToolName, mcuToolPreview);
   String error = jsonStringValue(message, F("error"));
   if (type == F("tool.completed")) {
     mcuToolStatus = error.length() > 0 ? F("ERROR") : F("DONE");
@@ -5664,6 +5765,8 @@ void sendMcuSocketNamespaceConnect() {
 
 void sendMcuReady() {
   String json = String(F("{\"type\":\"mcu.ready\",\"id\":\"")) + escapeJson(deviceId()) +
+                F("\",\"deviceCode\":\"") + escapeJson(mcuDeviceCode()) +
+                F("\",\"device_code\":\"") + escapeJson(mcuDeviceCode()) +
                 F("\",\"active_device\":\"") + escapeJson(activeDeviceKey) +
                 F("\",\"profile\":\"") + escapeJson(selectedProfile) +
                 F("\",\"capabilities\":{\"display\":true,\"audio_queue\":true,\"audio_playback\":true,\"pcm_stream\":false}}");
@@ -6366,6 +6469,7 @@ void setup() {
   loadActivePetCache();
   setOutputVolume(outputVolumePercent);
   initializeTouchButtons();
+  initializeChassisUart();
   setLcdStatus(LcdMode::Boot, F("BOOT"), F("WIFI ONLY"), 15);
   if (kForceSetupAp) {
     startSetupAp();

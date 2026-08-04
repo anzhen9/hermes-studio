@@ -9,6 +9,7 @@ import { logger } from '../logger'
 import { transcodeToPcmS16le } from '../hermes/stt-providers/audio-convert'
 import { encodeMcuImaAdpcm } from '../hermes/mcu-adpcm'
 import { MCU_TTS_SAMPLE_RATE, mcuPromptText, mcuPromptUrl } from '../hermes/mcu-prompts'
+import { matchMcuChassisCommand } from './mcu-chassis-command'
 import { createMcuSpeechSegmenter, normalizeMcuSpeechText } from './mcu-speech-segmenter'
 import { MCU_VOICE_SYSTEM_INSTRUCTIONS } from './mcu-voice-instructions'
 
@@ -845,6 +846,9 @@ class McuSocketIoRelayClient {
         return
       }
       this.sendJson({ type: 'interaction.status', interactionId: voice.interactionId, status: 'thinking', text: transcript })
+      if (this.dispatchDirectChassisCommand(voice.interactionId, transcript)) {
+        return
+      }
       await this.runChatFromTranscript(voice, transcript)
     } catch (err) {
       this.sendJson({
@@ -854,6 +858,31 @@ class McuSocketIoRelayClient {
         text: err instanceof Error ? err.message : String(err),
       })
     }
+  }
+
+  private dispatchDirectChassisCommand(interactionId: string, transcript: string): boolean {
+    const matched = matchMcuChassisCommand(transcript)
+    if (!matched) return false
+
+    logger.info({ interactionId, tool: matched.tool, transcript }, '[outbound-relay:ws] dispatching MCU chassis command from transcript')
+    this.sendJson({
+      type: 'tool.started',
+      interactionId,
+      tool: matched.tool,
+      preview: matched.preview,
+    })
+    this.sendJson({
+      type: 'tool.completed',
+      interactionId,
+      tool: matched.tool,
+      preview: matched.preview,
+    })
+    this.sendJson({
+      type: 'interaction.status',
+      interactionId,
+      status: 'completed',
+    })
+    return true
   }
 
   private async runChatFromTranscript(
