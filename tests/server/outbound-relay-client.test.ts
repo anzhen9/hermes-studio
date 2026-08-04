@@ -590,6 +590,64 @@ describe('outbound relay client', () => {
     expect(Buffer.from(uploadCall?.[1].body as Uint8Array).subarray(0, 4).toString('ascii')).toBe('HADP')
   })
 
+  it('dispatches direct MCU chassis transcripts without opening a local chat-run socket', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes('/api/hermes/mcu/voice-turn')) {
+        return new Response(JSON.stringify({ ok: true, transcript: '前进' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify({ error: 'unexpected url' }), {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    const { startOutboundRelayClient } = await import('../../packages/server/src/services/global-agent/outbound-relay-client')
+
+    startOutboundRelayClient({
+      relayUrl: 'http://device.local:8787',
+      relayProtocol: 'mcu-socket.io',
+      userToken: 'user-jwt',
+      deviceCode: 'device-code-1',
+      localBaseUrl: 'http://127.0.0.1:8648',
+      fetchImpl: fetchImpl as any,
+    })
+
+    const remoteSocket = connectRemoteSocket()
+    emitRemote(remoteSocket, 'voice.recorded', {
+      type: 'voice.recorded',
+      interactionId: 'voice-direct-chassis',
+      mimeType: 'audio/wav',
+      profile: 'research',
+    })
+    emitRemote(remoteSocket, 'voice.stream.chunk', {
+      type: 'voice.stream.chunk',
+      data: Buffer.from('wav-audio').toString('base64'),
+    })
+
+    await vi.waitFor(() => {
+      expect(remoteSocket.emit).toHaveBeenCalledWith('tool.started', {
+        type: 'tool.started',
+        interactionId: 'voice-direct-chassis',
+        tool: 'self.chassis.go_forward',
+        preview: '前进',
+      })
+    })
+    expect(remoteSocket.emit).toHaveBeenCalledWith('tool.completed', {
+      type: 'tool.completed',
+      interactionId: 'voice-direct-chassis',
+      tool: 'self.chassis.go_forward',
+      preview: '前进',
+    })
+    expect(remoteSocket.emit).toHaveBeenCalledWith('interaction.status', {
+      type: 'interaction.status',
+      interactionId: 'voice-direct-chassis',
+      status: 'completed',
+    })
+    expect(socketForUrl('http://127.0.0.1:8648/chat-run')).toBeUndefined()
+  })
+
   it('keeps direct relay background work non-blocking and sends only the final autonomous agent response', async () => {
     const fetchImpl = vi.fn(async (url: string) => {
       if (url.includes('/api/hermes/mcu/voice-turn')) {

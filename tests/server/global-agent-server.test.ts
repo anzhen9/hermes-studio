@@ -1683,6 +1683,56 @@ describe('GlobalAgentServer', () => {
     })
   })
 
+  it('dispatches direct MCU chassis transcripts without opening chat-run', async () => {
+    authMocks.authenticateUserToken.mockResolvedValue({ id: 7, username: 'ada', role: 'user' })
+    authMocks.userCanAccessProfile.mockReturnValue(true)
+    const nsp = createMockNamespace()
+    const io = { of: vi.fn(() => nsp) }
+    const { GlobalAgentServer } = await import('../../packages/server/src/services/global-agent/server')
+
+    const server = new GlobalAgentServer(io as any, { localBaseUrl: 'http://127.0.0.1:8647' })
+    server.init()
+
+    const agentSocket = createMockSocket('jwt-agent-socket', {
+      token: 'user-jwt',
+      role: 'hermes-studio',
+      instanceId: 'device-1',
+      profile: 'research',
+    })
+    await new Promise<void>((resolve, reject) => {
+      nsp.__middleware[0](agentSocket, (err?: Error) => err ? reject(err) : resolve())
+    })
+    nsp.__handlers.get('connection')?.(agentSocket)
+
+    server.startMcuVoiceChatTurn({
+      userToken: 'user-jwt',
+      profile: 'research',
+      interactionId: 'voice-chassis-1',
+      transcript: '前进一下',
+      clientId: 'device-1',
+    })
+
+    expect(clientSocketMocks.clientIo).not.toHaveBeenCalled()
+    expect(agentSocket.emit).toHaveBeenCalledWith('tool.started', {
+      type: 'tool.started',
+      interactionId: 'voice-chassis-1',
+      tool: 'self.chassis.go_forward',
+      preview: '前进一下',
+    })
+    expect(agentSocket.emit).toHaveBeenCalledWith('tool.completed', {
+      type: 'tool.completed',
+      interactionId: 'voice-chassis-1',
+      tool: 'self.chassis.go_forward',
+      preview: '前进一下',
+      error: undefined,
+    })
+    expect(agentSocket.emit).toHaveBeenCalledWith('interaction.status', {
+      type: 'interaction.status',
+      interactionId: 'voice-chassis-1',
+      status: 'completed',
+    })
+  })
+
   it('still aborts an active foreground run when MCU starts listening again', async () => {
     vi.useFakeTimers()
     try {
