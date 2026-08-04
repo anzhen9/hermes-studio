@@ -504,7 +504,9 @@ export class GlobalAgentServer {
     if (!expected) return false
     for (const socket of this.clients.values()) {
       const auth = socket.handshake.auth || {}
-      const raw = typeof auth.deviceCode === 'string'
+      const raw = typeof socket.data.mcuDeviceCode === 'string' && String(socket.data.mcuDeviceCode).trim()
+        ? String(socket.data.mcuDeviceCode)
+        : typeof auth.deviceCode === 'string'
         ? auth.deviceCode
         : typeof auth.device_code === 'string'
           ? auth.device_code
@@ -1475,8 +1477,22 @@ export class GlobalAgentServer {
       ? { ...payload, type: typeof payload.type === 'string' && payload.type ? payload.type : event }
       : { type: event, payload }
     if (!this.authorizeMcuEvent(clientId, event, body)) return
+    this.captureMcuDeviceCode(clientId, body)
     this.handleMcuClientEvent(clientId, event, body)
     this.emitFrontendBridgeEvent(clientId, this.redactMcuAuthPayload(body))
+  }
+
+  private captureMcuDeviceCode(clientId: string, payload: Record<string, unknown>): void {
+    const socket = this.clients.get(clientId)
+    if (!socket) return
+    const raw = typeof payload.deviceCode === 'string'
+      ? payload.deviceCode
+      : typeof payload.device_code === 'string'
+        ? payload.device_code
+        : ''
+    const normalized = raw.trim()
+    if (!normalized) return
+    socket.data.mcuDeviceCode = normalized
   }
 
   private mcuSessionId(clientId: string | undefined, profile: string): string {

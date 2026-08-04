@@ -5765,6 +5765,8 @@ void sendMcuSocketNamespaceConnect() {
 
 void sendMcuReady() {
   String json = String(F("{\"type\":\"mcu.ready\",\"id\":\"")) + escapeJson(deviceId()) +
+                F("\",\"deviceCode\":\"") + escapeJson(mcuDeviceCode()) +
+                F("\",\"device_code\":\"") + escapeJson(mcuDeviceCode()) +
                 F("\",\"active_device\":\"") + escapeJson(activeDeviceKey) +
                 F("\",\"profile\":\"") + escapeJson(selectedProfile) +
                 F("\",\"capabilities\":{\"display\":true,\"audio_queue\":true,\"audio_playback\":true,\"pcm_stream\":false}}");

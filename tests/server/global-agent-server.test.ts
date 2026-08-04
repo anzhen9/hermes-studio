@@ -249,6 +249,37 @@ describe('GlobalAgentServer', () => {
     expect(response).toEqual({ id: 'req-1', status: 200, body: '{"ok":true}' })
   })
 
+  it('learns MCU device codes from ready events when the handshake auth does not include them', async () => {
+    authMocks.authenticateUserToken.mockResolvedValue({ id: 7, username: 'ada', role: 'user' })
+    authMocks.userCanAccessProfile.mockReturnValue(true)
+    const nsp = createMockNamespace()
+    const io = { of: vi.fn(() => nsp) }
+    const { GlobalAgentServer } = await import('../../packages/server/src/services/global-agent/server')
+
+    const server = new GlobalAgentServer(io as any)
+    server.init()
+
+    const socket = createMockSocket('jwt-agent-socket', {
+      token: 'user-jwt',
+      role: 'hermes-studio',
+      instanceId: 'device-1',
+      profile: 'research',
+    })
+    await new Promise<void>((resolve, reject) => {
+      nsp.__middleware[0](socket, (err?: Error) => err ? reject(err) : resolve())
+    })
+    nsp.__handlers.get('connection')?.(socket)
+
+    expect(server.hasMcuDeviceCode('hstudio_mcu_test')).toBe(false)
+
+    socket.__handlers.get('mcu.ready')?.({
+      device_code: 'hstudio_mcu_test',
+      profile: 'research',
+    })
+
+    expect(server.hasMcuDeviceCode('hstudio_mcu_test')).toBe(true)
+  })
+
   it('accepts frontend JWT clients and injects their token and profile into forwarded requests', async () => {
     authMocks.authenticateUserToken.mockResolvedValue({ id: 7, username: 'ada', role: 'user' })
     authMocks.userCanAccessProfile.mockReturnValue(true)
