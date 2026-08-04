@@ -150,10 +150,6 @@ constexpr int kVoiceOutputGainPermille = 820;
 constexpr int16_t kVoiceOutputLimit = 25500;
 constexpr uint8_t kEs8311DacVolume = 0xC8;
 constexpr uint8_t kEs8311DacMinimumAudibleVolume = 0xB0;
-constexpr uint16_t kVolumeFeedbackFrequencyHz = 1000;
-constexpr uint16_t kVolumeFeedbackDurationMs = 500;
-constexpr uint16_t kVolumeFeedbackFadeMs = 8;
-constexpr int16_t kVolumeFeedbackAmplitude = 9000;
 constexpr uint32_t kWakeWordTaskStackWords = 4096;
 constexpr UBaseType_t kWakeWordTaskPriority = 3;
 constexpr i2s_port_t kI2sPort = I2S_NUM_0;
@@ -1676,48 +1672,6 @@ bool setOutputVolume(uint8_t volume) {
   return true;
 }
 
-void playVolumeFeedbackBeep() {
-  if (!i2sReady || !es8311Ready || audioBusy || mcuAudioPlaying) return;
-
-  constexpr size_t kFramesPerBuffer = 120;
-  constexpr float kTwoPi = 6.28318530718f;
-  int16_t stereo[kFramesPerBuffer * 2];
-  const uint32_t totalFrames = (kAudioSampleRate * kVolumeFeedbackDurationMs) / 1000UL;
-  const uint32_t fadeFrames = (kAudioSampleRate * kVolumeFeedbackFadeMs) / 1000UL;
-  uint32_t framesWritten = 0;
-
-  audioBusy = true;
-  es8311UpdateBits(0x31, 0x60, 0x00);
-  setI2sSampleRate(kAudioSampleRate);
-  i2s_zero_dma_buffer(kI2sPort);
-  while (framesWritten < totalFrames) {
-    size_t frames = min<size_t>(kFramesPerBuffer, totalFrames - framesWritten);
-    for (size_t frame = 0; frame < frames; ++frame) {
-      uint32_t sampleIndex = framesWritten + frame;
-      float envelope = 1.0f;
-      if (sampleIndex < fadeFrames) {
-        envelope = static_cast<float>(sampleIndex) / fadeFrames;
-      } else if (sampleIndex >= totalFrames - fadeFrames) {
-        envelope = static_cast<float>(totalFrames - sampleIndex) / fadeFrames;
-      }
-      float phase = kTwoPi * kVolumeFeedbackFrequencyHz * sampleIndex / kAudioSampleRate;
-      int16_t sample = static_cast<int16_t>(sinf(phase) * kVolumeFeedbackAmplitude * envelope);
-      stereo[frame * 2] = sample;
-      stereo[frame * 2 + 1] = sample;
-    }
-    size_t written = 0;
-    if (i2s_write(kI2sPort, stereo, frames * 2 * sizeof(int16_t), &written,
-                  pdMS_TO_TICKS(1000)) != ESP_OK) {
-      lastAudioDetail = F("volume feedback beep failed");
-      break;
-    }
-    framesWritten += written / (2 * sizeof(int16_t));
-  }
-  i2s_zero_dma_buffer(kI2sPort);
-  setI2sSampleRate(kVoiceInputSampleRate);
-  audioBusy = false;
-}
-
 void adjustOutputVolume(int direction) {
   int nextVolume = static_cast<int>(outputVolumePercent) + direction * kTouchVolumeStepPercent;
   if (nextVolume < 0) nextVolume = 0;
@@ -1725,7 +1679,6 @@ void adjustOutputVolume(int direction) {
   if (nextVolume == outputVolumePercent) return;
   if (!setOutputVolume(static_cast<uint8_t>(nextVolume))) return;
   setLcdStatus(LcdMode::Ready, F("VOLUME"), String(outputVolumePercent) + F("%"), 0);
-  playVolumeFeedbackBeep();
   Serial.printf("Touch volume changed to %u%%\n", outputVolumePercent);
 }
 
