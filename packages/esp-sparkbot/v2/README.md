@@ -26,9 +26,9 @@ idf.py -p COM4 flash monitor
 
 ## Wake word
 
-The user-facing wake word is `嘿，小方`, configured through
+The user-facing wake word is `小方小方`, configured through
 `CONFIG_HERMES_WAKE_WORD_DISPLAY`. The v2 runtime registers the matching pinyin
-command `hei xiao fang` from `CONFIG_HERMES_WAKE_WORD_COMMAND` with ESP-SR
+command `xiao fang xiao fang` from `CONFIG_HERMES_WAKE_WORD_COMMAND` with ESP-SR
 MultiNet. On recognition it starts a four-second Socket.IO voice-stream capture
 without a button hold. The selected ESP-SR MultiNet model must support that
 command; the serial log reports a missing model at boot and button/touch voice
