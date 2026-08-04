@@ -10,7 +10,7 @@ import {
 import { hermesAgentVersionFromRuntimeTag } from './runtime-version'
 
 const isWin = platform() === 'win32'
-const DEFAULT_HERMES_AGENT_VERSION = '0.19.1'
+const DEFAULT_HERMES_AGENT_VERSION = '0.20.0'
 const PACKAGED_RUNTIME_RELEASE_NAME = 'runtime-release.json'
 const ACTIVE_RUNTIME_VERSION_NAME = 'active-version.json'
 let incompleteActiveWebUiWarningPath = ''
@@ -46,7 +46,7 @@ function runtimeRequiredFiles(root: string): string[] {
   const sourceRoot = join(root, 'python')
   const environmentRoot = runtimePythonEnvironmentRoot(sourceRoot)
   const python = runtimePythonExecutable(environmentRoot)
-  const hermes = isWin ? join(environmentRoot, 'Scripts', 'hermes.cmd') : join(environmentRoot, 'bin', 'hermes')
+  const hermes = isWin ? windowsHermesLauncher(environmentRoot) : join(environmentRoot, 'bin', 'hermes')
   const node = isWin ? join(root, 'node', 'node.exe') : join(root, 'node', 'bin', 'node')
   const files = [python, hermes, node]
   if (isWin) files.push(join(root, 'git', 'cmd', 'git.exe'))
@@ -290,6 +290,15 @@ function runtimePythonExecutable(environmentRoot: string): string {
     : join(environmentRoot, 'python.exe')
 }
 
+function windowsHermesLauncher(environmentRoot: string): string {
+  const scriptsRoot = join(environmentRoot, 'Scripts')
+  const commandWrapper = join(scriptsRoot, 'hermes.cmd')
+  const executable = join(scriptsRoot, 'hermes.exe')
+  return existsSync(commandWrapper) || !existsSync(executable)
+    ? commandWrapper
+    : executable
+}
+
 export function nodeDir(): string {
   return runtimeResourceDir('node', isPackaged())
 }
@@ -374,7 +383,7 @@ export function bundledPython(): string {
 }
 
 export function hermesBin(): string {
-  return isWin ? join(pythonBinDir(), 'hermes.cmd') : join(pythonBinDir(), 'hermes')
+  return isWin ? windowsHermesLauncher(pythonEnvironmentDir()) : join(pythonBinDir(), 'hermes')
 }
 
 export function hermesBinExists(): boolean {
