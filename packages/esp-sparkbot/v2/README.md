@@ -13,6 +13,28 @@ by v1 while retaining its Hermes-facing contracts:
 - ES8311/I2S microphone and DAC setup, ST7789 240x240 display setup, boot and
   touch input pin allocation, plus the v1 voice-turn/session integration hooks
 
+## Hardware requirement
+
+ESP-SparkBot v2 currently targets boards starting from `ESP32-S3-N16R8`.
+
+- Minimum supported flash/PSRAM: `16 MB flash + 8 MB PSRAM`
+- Recommended module class: `ESP32-S3-N16R8`
+
+The current partition layout keeps two OTA app slots and also reserves a
+dedicated pet spritesheet cache partition plus a separate ESP-SR model
+partition. With the shipped v2 partition table, `8 MB flash` devices are not
+supported.
+
+In practice this means:
+
+- `ESP32-S3-N16R8`: supported by the current v2 layout
+- `ESP32-S3-N8R8` or other `8 MB flash` variants: not supported by the current
+  v2 layout
+
+If an `8 MB flash` target is needed later, it requires a different storage
+plan such as dropping dual OTA, shrinking or removing pet cache, or redesigning
+resource partitions.
+
 ## Build
 
 Install ESP-IDF `>=5.5.2`, activate its environment, then run:
