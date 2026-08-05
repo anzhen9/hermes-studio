@@ -11,6 +11,8 @@
 #include <math.h>
 #include <memory>
 #include <vector>
+#include "esp_camera.h"
+#include "driver/i2c.h"
 #include "driver/i2s.h"
 #include "driver/uart.h"
 #include "esp_crc.h"
@@ -21,6 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/base64.h"
+#include "mbedtls/sha1.h"
 #include "esp_mn_iface.h"
 #include "esp_mn_models.h"
 #include "esp_mn_speech_commands.h"
@@ -67,6 +70,20 @@ constexpr int kPinLcdBl = 46;
 constexpr int kPinTouchAction = 1;
 constexpr int kPinTouchVolumeDown = 2;
 constexpr int kPinTouchVolumeUp = 3;
+// OV2640 camera pins follow the SparkBot board wiring.
+constexpr int kPinCameraXclk = 15;
+constexpr int kPinCameraPclk = 13;
+constexpr int kPinCameraVsync = 6;
+constexpr int kPinCameraHsync = 7;
+constexpr int kPinCameraD0 = 11;
+constexpr int kPinCameraD1 = 9;
+constexpr int kPinCameraD2 = 8;
+constexpr int kPinCameraD3 = 10;
+constexpr int kPinCameraD4 = 12;
+constexpr int kPinCameraD5 = 18;
+constexpr int kPinCameraD6 = 17;
+constexpr int kPinCameraD7 = 16;
+constexpr int kCameraXclkHz = 16000000;
 // Tank base UART pins follow the xiaozhi esp-sparkbot board wiring.
 constexpr uart_port_t kChassisUartPort = UART_NUM_1;
 constexpr int kPinChassisUartTx = 38;
@@ -160,6 +177,10 @@ constexpr uint8_t kEs8311DacMinimumAudibleVolume = 0xB0;
 constexpr uint32_t kWakeWordTaskStackWords = 4096;
 constexpr UBaseType_t kWakeWordTaskPriority = 3;
 constexpr i2s_port_t kI2sPort = I2S_NUM_0;
+constexpr uint16_t kCameraPreviewWsPort = 82;
+constexpr uint32_t kCameraPreviewFrameIntervalMs = 80;
+constexpr uint32_t kLocalPetMotionHoldMs = 700;
+constexpr uint32_t kLocalPetDanceHoldMs = 15000;
 
 // --- Color palette (RGB565) ---
 constexpr uint16_t kColorBg = 0x0000;      // Black
@@ -173,10 +194,12 @@ constexpr uint32_t kSpiFrequency = 80000000;
 
 Preferences prefs;
 WebServer server(80);
+WiFiServer cameraPreviewWsServer(kCameraPreviewWsPort);
 WiFiUDP lanUdp;
 WiFiClient mcuWsPlainClient;
 WiFiClientSecure mcuWsSecureClient;
 WiFiClient *mcuWsClient = &mcuWsPlainClient;
+WiFiClient cameraPreviewWsClient;
 SPIClass lcdSpi(FSPI);
 uint16_t *lcdBuffer = nullptr;
 bool wifiReady = false;
@@ -191,6 +214,8 @@ bool mcuSocketNamespaceReady = false;
 bool restartPending = false;
 bool audioBusy = false;
 bool chassisUartReady = false;
+bool cameraReady = false;
+bool cameraPreviewWsReady = false;
 bool paEnabled = false;
 bool i2sReady = false;
 uint32_t i2sSampleRate = kVoiceInputSampleRate;
@@ -209,6 +234,7 @@ uint32_t lastLanDiscoveryAtMs = 0;
 uint32_t lastMcuLoginAtMs = 0;
 uint32_t lastMcuSocketConnectAtMs = 0;
 uint8_t chassisLightMode = 2;
+uint32_t lastCameraPreviewFrameAtMs = 0;
 uint32_t lastBootButtonAtMs = 0;
 uint32_t bootPressedAtMs = 0;
 uint32_t bootClickPendingAtMs = 0;
@@ -233,7 +259,9 @@ String mcuToolName;
 String mcuToolPreview;
 String mcuToolStatus;
 String lastAudioDetail = "not started";
+String localPetOverrideState;
 uint32_t lastAudioAtMs = 0;
+uint32_t localPetOverrideUntilMs = 0;
 uint8_t outputVolumePercent = 100;
 uint8_t mcuAdpcmInputBuffer[kMcuAdpcmReadChunkBytes];
 int16_t mcuAdpcmStereoBuffer[kMcuAdpcmOutputFrames * 2];
@@ -322,8 +350,19 @@ void disconnectMcuSocketClient();
 void connectMcuSocketClient();
 void mcuSocketLoop();
 void refreshLcd(bool force = false);
+void initializeCamera();
+void initializeCameraPreviewWs();
+void tickCameraPreviewWs();
 void initializeChassisUart();
+bool sendChassisVector(float x, float y);
+bool sendChassisPathCorrection(float delta);
 void executeChassisTool(const String &tool, const String &preview);
+void sendControlPage(const String &notice = "", bool ok = true);
+void handleChassisControl();
+void handleChassisControlCommand();
+void handleCameraJpeg();
+void setLocalPetOverrideState(const String &state, uint32_t holdMs = kLocalPetMotionHoldMs);
+void clearLocalPetOverrideState();
 bool waitForMcuSocketReady(uint32_t timeoutMs);
 void enqueueNoDevicePrompt(const String &interactionId);
 String activeDeviceEndpoint(const __FlashStringHelper *path);
@@ -339,6 +378,7 @@ void startActivePetTask();
 bool refreshActivePetDisplay(bool force = false, bool saveCache = true);
 bool refreshActivePetSprite(bool force = false, bool saveCache = true);
 bool refreshPetState();
+uint8_t petStateToRowIndex(const String &state);
 void startWakeWordTask();
 void tickWakeWord();
 bool setI2sSampleRate(uint32_t sampleRate);
@@ -459,6 +499,51 @@ bool i2cProbe(uint8_t address) {
   return Wire.endTransmission() == 0;
 }
 
+void initializeCamera() {
+  if (cameraReady) return;
+
+  camera_config_t config = {};
+  config.pin_pwdn = GPIO_NUM_NC;
+  config.pin_reset = GPIO_NUM_NC;
+  config.pin_xclk = kPinCameraXclk;
+  config.pin_sccb_sda = GPIO_NUM_NC;
+  config.pin_sccb_scl = GPIO_NUM_NC;
+  config.pin_d7 = kPinCameraD7;
+  config.pin_d6 = kPinCameraD6;
+  config.pin_d5 = kPinCameraD5;
+  config.pin_d4 = kPinCameraD4;
+  config.pin_d3 = kPinCameraD3;
+  config.pin_d2 = kPinCameraD2;
+  config.pin_d1 = kPinCameraD1;
+  config.pin_d0 = kPinCameraD0;
+  config.pin_vsync = kPinCameraVsync;
+  config.pin_href = kPinCameraHsync;
+  config.pin_pclk = kPinCameraPclk;
+  config.xclk_freq_hz = kCameraXclkHz;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.frame_size = FRAMESIZE_QVGA;
+  config.jpeg_quality = 20;
+  config.fb_count = 2;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.sccb_i2c_port = I2C_NUM_0;
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed err=%d\n", static_cast<int>(err));
+    return;
+  }
+
+  sensor_t *sensor = esp_camera_sensor_get();
+  if (sensor) {
+    sensor->set_vflip(sensor, 0);
+    sensor->set_hmirror(sensor, 0);
+  }
+  cameraReady = true;
+  Serial.println(F("Camera init done"));
+}
+
 void initializeChassisUart() {
   if (chassisUartReady) return;
   uart_config_t config = {};
@@ -493,6 +578,52 @@ void sendChassisCommand(const char *command) {
   Serial.printf("Chassis command sent: %s\n", command);
 }
 
+bool sendChassisVector(float x, float y) {
+  if (!chassisUartReady) return false;
+  char command[32];
+  snprintf(command, sizeof(command), "x%.2f y%.2f", static_cast<double>(x), static_cast<double>(y));
+  sendChassisCommand(command);
+  if (fabsf(x) < 0.05f && fabsf(y) < 0.05f) {
+    clearLocalPetOverrideState();
+  } else if (x <= -0.1f) {
+    setLocalPetOverrideState(F("running-left"));
+  } else if (x >= 0.1f) {
+    setLocalPetOverrideState(F("running-right"));
+  } else {
+    setLocalPetOverrideState(F("running"));
+  }
+  return true;
+}
+
+bool sendChassisPathCorrection(float delta) {
+  if (!chassisUartReady) return false;
+  char command[16];
+  snprintf(command, sizeof(command), "c%.2f", static_cast<double>(delta));
+  sendChassisCommand(command);
+  return true;
+}
+
+void setLocalPetOverrideState(const String &state, uint32_t holdMs) {
+  localPetOverrideState = state;
+  localPetOverrideUntilMs = millis() + holdMs;
+  lcdDirty = true;
+}
+
+void clearLocalPetOverrideState() {
+  if (localPetOverrideState.length() == 0 && localPetOverrideUntilMs == 0) return;
+  localPetOverrideState = "";
+  localPetOverrideUntilMs = 0;
+  lcdDirty = true;
+}
+
+bool sendChassisLightMode(uint8_t mode) {
+  if (!chassisUartReady || mode < 2 || mode > 8) return false;
+  char command[3] = {'w', static_cast<char>('0' + mode), '\0'};
+  chassisLightMode = mode;
+  sendChassisCommand(command);
+  return true;
+}
+
 bool resolveChassisLightMode(const String &preview, uint8_t *modeOut) {
   if (!modeOut) return false;
   for (size_t index = 0; index < preview.length(); ++index) {
@@ -515,23 +646,24 @@ void executeChassisTool(const String &tool, const String &preview) {
   if (!chassisUartReady || tool.length() == 0) return;
 
   if (tool == F("self.chassis.go_forward") || tool == F("前进")) {
-    sendChassisCommand("x0.0 y1.0");
+    sendChassisVector(0.0f, 1.0f);
     return;
   }
   if (tool == F("self.chassis.go_back") || tool == F("后退")) {
-    sendChassisCommand("x0.0 y-1.0");
+    sendChassisVector(0.0f, -1.0f);
     return;
   }
   if (tool == F("self.chassis.turn_left") || tool == F("向左转") || tool == F("左转")) {
-    sendChassisCommand("x-1.0 y0.0");
+    sendChassisVector(-1.0f, 0.0f);
     return;
   }
   if (tool == F("self.chassis.turn_right") || tool == F("向右转") || tool == F("右转")) {
-    sendChassisCommand("x1.0 y0.0");
+    sendChassisVector(1.0f, 0.0f);
     return;
   }
   if (tool == F("self.chassis.dance") || tool == F("跳舞")) {
     sendChassisCommand("d1");
+    setLocalPetOverrideState(F("jumping"), kLocalPetDanceHoldMs);
     return;
   }
   if (tool == F("self.chassis.switch_light_mode") || tool == F("打开灯光效果") || tool == F("灯光")) {
@@ -539,11 +671,7 @@ void executeChassisTool(const String &tool, const String &preview) {
     if (!resolveChassisLightMode(preview, &mode)) {
       mode = chassisLightMode >= 7 ? 2 : static_cast<uint8_t>(chassisLightMode + 1);
     }
-    if (mode >= 2 && mode <= 8) {
-      char command[3] = {'w', static_cast<char>('0' + mode), '\0'};
-      chassisLightMode = mode;
-      sendChassisCommand(command);
-    }
+    sendChassisLightMode(mode);
     return;
   }
 }
@@ -782,27 +910,6 @@ void lcdDrawCenteredText(int y, const String &text, uint8_t scale, uint16_t colo
   lcdDrawText(max(0, x), y, text, scale, color);
 }
 
-void lcdDrawDiagonal(int x1, int y1, int x2, int y2, uint16_t color) {
-  int dx = abs(x2 - x1);
-  int sx = x1 < x2 ? 1 : -1;
-  int dy = -abs(y2 - y1);
-  int sy = y1 < y2 ? 1 : -1;
-  int error = dx + dy;
-  while (true) {
-    lcdSetPixel(x1, y1, color);
-    if (x1 == x2 && y1 == y2) return;
-    int twiceError = error * 2;
-    if (twiceError >= dy) {
-      error += dy;
-      x1 += sx;
-    }
-    if (twiceError <= dx) {
-      error += dx;
-      y1 += sy;
-    }
-  }
-}
-
 void lcdDrawPetSwitchingLabel() {
   lcdDrawCenteredText(198, F("SWITCHING..."), 2, kColorFg);
 }
@@ -965,11 +1072,20 @@ void drawActivePetFrame() {
   uint8_t frameCount = max<uint8_t>(activePetDisplay.frameCount, 1);
   uint8_t frameIndex = static_cast<uint8_t>((millis() % loopMs) / max<uint32_t>(1, loopMs / frameCount));
   if (frameIndex >= frameCount) frameIndex = frameCount - 1;
+  uint8_t activeRowIndex = activePetDisplay.stateRowIndex;
+  if (localPetOverrideState.length() > 0) {
+    if (static_cast<int32_t>(millis() - localPetOverrideUntilMs) < 0) {
+      activeRowIndex = petStateToRowIndex(localPetOverrideState);
+      if (activeRowIndex >= activePetDisplay.rowCount) activeRowIndex = 0;
+    } else {
+      clearLocalPetOverrideState();
+    }
+  }
   int x = kActivePetRegionX + (kActivePetRegionWidth - activePetDisplay.frameWidth) / 2;
   int y = kActivePetRegionY + (kActivePetRegionHeight - activePetDisplay.frameHeight) / 2;
   blitRgb565SpriteFrame(x, y, activePetDisplay.spritePixels, activePetDisplay.frameWidth,
                         activePetDisplay.frameHeight, activePetDisplay.spriteStripWidth, frameIndex,
-                        activePetDisplay.stateRowIndex);
+                        activeRowIndex);
 }
 
 bool lcdFlush() {
@@ -2568,8 +2684,9 @@ String pageStart(const String &title) {
                   "main{max-width:760px;margin:auto;padding:28px 18px 40px}.panel,.card{background:var(--surface);border:1px solid var(--line);border-radius:6px}.panel{padding:22px}.card{padding:16px;margin-top:12px}"
                   "h1{font-size:clamp(28px,5vw,44px);line-height:1.05;margin:0 0 10px}h2{font-size:18px;margin:0 0 10px}.lead,.hint{color:var(--muted);line-height:1.6}.lead{font-size:15px;margin:0 0 18px}.hint{font-size:12px;margin:0}.meta{font:12px/1.4 ui-monospace,'SFMono-Regular',Consolas,monospace;color:var(--muted);word-break:break-all}"
                   "form{display:grid;gap:12px}.field{display:grid;gap:7px}.label{font-size:12px;color:var(--muted)}input,select{width:100%;min-height:42px;border:1px solid var(--line);border-radius:6px;background:#fff;padding:10px 11px;font:14px/1.2 ui-monospace,'SFMono-Regular',Consolas,monospace;color:var(--ink)}select{appearance:none;-webkit-appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 18px) 18px,calc(100% - 13px) 18px;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:34px}input:focus,select:focus{outline:2px solid #cfcfcf;outline-offset:1px}"
-                  ".tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);margin:18px -22px 18px;padding:0 22px}.tab{border:1px solid var(--line);border-bottom:0;border-radius:6px 6px 0 0;background:#f4f4f4;min-height:38px;padding:10px 14px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none}.tab.active{background:var(--surface);position:relative;top:1px}.info-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.provision-code{margin-bottom:18px}.info-row{border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}.info-row span{display:block;color:var(--muted);font-size:12px;margin-bottom:7px}.info-row strong{display:block;font:600 14px/1.35 ui-monospace,'SFMono-Regular',Consolas,monospace;word-break:break-all}@media(max-width:560px){.info-grid{grid-template-columns:1fr}}"
-                  ".btn{border:1px solid var(--line);background:var(--surface);border-radius:6px;min-height:38px;padding:9px 13px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn.warn{background:var(--warn);border-color:var(--warn);color:#fff}.btn-row{display:flex;gap:10px;flex-wrap:wrap}.ok{color:var(--good)}.bad{color:var(--warn)}"
+                  ".tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);margin:18px -22px 18px;padding:0 22px}.tab{border:1px solid var(--line);border-bottom:0;border-radius:6px 6px 0 0;background:#f4f4f4;min-height:38px;padding:10px 14px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none}.tab.active{background:var(--surface);position:relative;top:1px}.info-grid,.control-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.provision-code{margin-bottom:18px}.info-row{border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}.info-row span{display:block;color:var(--muted);font-size:12px;margin-bottom:7px}.info-row strong{display:block;font:600 14px/1.35 ui-monospace,'SFMono-Regular',Consolas,monospace;word-break:break-all}@media(max-width:560px){.info-grid,.control-grid{grid-template-columns:1fr}}"
+                  ".btn{border:1px solid var(--line);background:var(--surface);border-radius:6px;min-height:38px;padding:9px 13px;font:600 13px/1 'Avenir Next','PingFang SC','Noto Sans CJK SC',sans-serif;color:inherit;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn.warn{background:var(--warn);border-color:var(--warn);color:#fff}.btn-row{display:flex;gap:10px;flex-wrap:wrap}.control-grid form{display:block}.control-grid .btn{width:100%;min-height:46px}.ok{color:var(--good)}.bad{color:var(--warn)}"
+                  ".preview-box,.camera-frame{aspect-ratio:4/3;border:1px dashed var(--line);border-radius:10px;background:linear-gradient(180deg,#f7f7f7,#ececec);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;text-align:center;padding:18px;overflow:hidden}.camera-preview{display:block;width:100%;height:100%;object-fit:cover;background:#ddd}.light-row{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}.light-chip{width:34px;height:34px;border-radius:999px;border:1px solid var(--line);background:#f5f5f5;color:var(--muted);display:inline-flex;align-items:center;justify-content:center;font:600 12px/1 ui-monospace,'SFMono-Regular',Consolas,monospace;cursor:pointer}.light-chip.active,.light-chip:hover{background:var(--accent);border-color:var(--accent);color:#fff}.mini-row{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}.mini-btn{width:36px;height:36px;border-radius:999px;border:1px solid var(--line);background:#f5f5f5;color:inherit;display:inline-flex;align-items:center;justify-content:center;font:600 13px/1 sans-serif;cursor:pointer}.dpad{display:grid;grid-template-columns:repeat(3,minmax(0,90px));gap:10px;justify-content:center;align-items:center;margin-top:18px}.dpad .btn{min-height:48px}.camera-note{margin-top:12px}.control-status{min-height:22px;font-size:12px;color:var(--muted)}"
                   "</style></head><body><main>");
   return html;
 }
@@ -2646,7 +2763,7 @@ void sendStatusPage() {
   html += escapeHtml(WiFi.SSID());
   html += F(" · IP ");
   html += WiFi.localIP().toString();
-  html += F("</p><nav class='tabs'><a class='tab active' href='/device'>设备</a><a class='tab' href='/ota'>OTA</a></nav>");
+  html += F("</p><nav class='tabs'><a class='tab active' href='/device'>设备</a><a class='tab' href='/control'>控制</a><a class='tab' href='/ota'>OTA</a></nav>");
 
   html += F("<h2>本机</h2><div class='info-grid'>");
   appendInfoRow(html, F("Wi-Fi"), WiFi.SSID());
@@ -2748,6 +2865,59 @@ void sendStatusPage() {
   server.send(200, F("text/html; charset=utf-8"), html);
 }
 
+void sendControlPage(const String &notice, bool ok) {
+  String html = pageStart(F("底座控制"));
+  html += F("<style>.light-chip,.mini-btn,.move-btn,.action-btn{transition:transform 120ms ease,box-shadow 120ms ease,filter 120ms ease}.light-chip:active,.mini-btn:active,.move-btn:active,.action-btn:active,.control-clicked{transform:translateY(2px) scale(.96);filter:brightness(.88);box-shadow:inset 0 2px 4px rgba(0,0,0,.2)}.control-clicked{animation:control-click 220ms ease-out}@keyframes control-click{0%{transform:scale(1)}50%{transform:translateY(2px) scale(.94)}100%{transform:scale(1)}}</style>");
+  html += F("<section class='panel'><p class='meta'>HStudio ESP-SparkBot</p><h1>控制</h1><p class='lead'>参考 SparkBot 原厂移动控制页的本地底座控制面板</p>");
+  html += F("<nav class='tabs'><a class='tab' href='/device'>设备</a><a class='tab active' href='/control'>控制</a><a class='tab' href='/ota'>OTA</a></nav>");
+  if (notice.length() > 0) {
+    html += F("<p class='");
+    html += ok ? F("lead ok'>") : F("lead bad'>");
+    html += escapeHtml(notice);
+    html += F("</p>");
+  }
+  html += F("<h2>底座状态</h2><div class='info-grid'>");
+  appendInfoRow(html, F("串口"), String(chassisUartReady ? F("就绪") : F("未就绪")) + F(" · UART1 115200"));
+  appendInfoRow(html, F("默认灯效"), String(F("w")) + String(chassisLightMode));
+  appendInfoRow(html, F("当前交互"), activeDeviceLabel().length() > 0 ? activeDeviceLabel() : String(F("未连接")));
+  appendInfoRow(html, F("服务连接"), mcuSocketStateLabel());
+  html += F("</div></section>");
+
+  html += F("<section class='card'><h2>移动控制</h2>");
+  if (cameraReady) {
+    html += F("<div class='camera-frame'><img id='camera-preview-ws' class='camera-preview' alt='Camera preview'></div>");
+  } else {
+    html += F("<div class='preview-box'>摄像头尚未初始化成功。<br>本页仍可使用底座控制、灯效和路径校准功能。</div>");
+  }
+  html += F("<div class='light-row' style='margin-top:18px'>");
+  const char *lightLabels[] = {"A", "B", "C", "D", "E", "F"};
+  for (uint8_t idx = 0; idx < 6; ++idx) {
+    uint8_t mode = static_cast<uint8_t>(idx + 2);
+    html += F("<button class='light-chip");
+    if (mode == chassisLightMode) html += F(" active");
+    html += F("' type='button' data-light-mode='");
+    html += mode;
+    html += F("'>");
+    html += lightLabels[idx];
+    html += F("</button>");
+    if (idx == 2) html += F("<span style='font-size:13px;color:var(--muted);margin:0 4px'>灯光效果</span>");
+  }
+  html += F("</div>");
+  html += F("<div class='mini-row' style='margin-top:12px'><button class='mini-btn' type='button' data-path='-0.01'>&#8630;</button><span style='font-size:13px;color:var(--muted)'>路径修正</span><button class='mini-btn' type='button' data-path='0.01'>&#8631;</button></div>");
+  html += F("<div class='dpad'><div></div><button class='btn primary move-btn' type='button' data-x='0' data-y='1'>前</button><div></div><button class='btn move-btn' type='button' data-x='-1' data-y='0'>左</button><div></div><button class='btn move-btn' type='button' data-x='1' data-y='0'>右</button><div></div><button class='btn primary move-btn' type='button' data-x='0' data-y='-1'>后</button><div></div></div>");
+  html += F("<div class='btn-row' style='justify-content:center;margin-top:14px'><button class='btn action-btn' type='button' data-action='dance'>跳舞</button><button class='btn primary action-btn' type='button' data-action='light_next'>下一个灯效</button><a class='btn' href='/camera.jpg' download='sparkbot.jpg'>截图</a></div>");
+  html += F("<p class='control-status' id='control-status'>等待控制指令</p>");
+  html += F("<p class='hint'>控制指令直接通过本地 HTTP 发送到底座 UART1。方向键按下时发送移动，松开后自动发送停止。</p>");
+  html += F("<script>(function(){var buttons=document.querySelectorAll('.light-chip,.mini-btn,.move-btn,.action-btn');buttons.forEach(function(button){button.addEventListener('click',function(){button.classList.remove('control-clicked');void button.offsetWidth;button.classList.add('control-clicked');setTimeout(function(){button.classList.remove('control-clicked');},240);});});})();</script>");
+  html += F("<script>(function(){var statusEl=document.getElementById('control-status');var preview=document.getElementById('camera-preview');var lightButtons=[].slice.call(document.querySelectorAll('[data-light-mode]'));function setStatus(text,bad){if(!statusEl)return;statusEl.textContent=text||'';statusEl.style.color=bad?'var(--warn)':'var(--muted)';}function post(params,done){fetch('/control/command',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:new URLSearchParams(params).toString()}).then(function(r){return r.text().then(function(t){if(!r.ok)throw new Error(t||('HTTP '+r.status));return t;});}).then(function(t){done(t||'OK',false);}).catch(function(err){done(err&&err.message?err.message:'REQUEST FAILED',true);});}function sendStop(){post({action:'stop'},function(msg,bad){setStatus(msg,bad);});}function markLight(mode){lightButtons.forEach(function(btn){btn.classList.toggle('active', Number(btn.dataset.lightMode||'0')===mode);});}lightButtons.forEach(function(btn){btn.addEventListener('click',function(){var mode=Number(btn.dataset.lightMode||'0');post({action:'light_set',mode:String(mode)},function(msg,bad){setStatus(msg,bad);if(!bad)markLight(mode);});});});[].slice.call(document.querySelectorAll('[data-path]')).forEach(function(btn){btn.addEventListener('click',function(){post({action:'path',delta:String(btn.dataset.path||'0')},function(msg,bad){setStatus(msg,bad);});});});[].slice.call(document.querySelectorAll('.action-btn')).forEach(function(btn){btn.addEventListener('click',function(){var action=btn.dataset.action||'';post({action:action},function(msg,bad){setStatus(msg,bad);if(!bad&&action==='light_next'){var current=Number((document.querySelector('[data-light-mode].active')||{}).dataset?.lightMode||'2');var next=current>=7?2:current+1;markLight(next);}});});});[].slice.call(document.querySelectorAll('.move-btn')).forEach(function(btn){var active=false;var start=function(e){if(e)e.preventDefault();if(active)return;active=true;post({action:'vector',x:String(btn.dataset.x||'0'),y:String(btn.dataset.y||'0')},function(msg,bad){setStatus(msg,bad);});};var stop=function(){if(!active)return;active=false;sendStop();};btn.addEventListener('mousedown',start);btn.addEventListener('touchstart',start,{passive:false});btn.addEventListener('mouseup',stop);btn.addEventListener('mouseleave',stop);btn.addEventListener('touchend',stop);btn.addEventListener('touchcancel',stop);window.addEventListener('mouseup',stop);window.addEventListener('touchend',stop);window.addEventListener('touchcancel',stop);});if(preview){var previewBusy=false;var previewTimer=0;var queuePreview=function(delay){clearTimeout(previewTimer);previewTimer=setTimeout(function(){if(previewBusy)return;previewBusy=true;preview.src='/camera.jpg?ts='+Date.now();},delay||0);};preview.addEventListener('load',function(){previewBusy=false;setStatus('CAMERA OK',false);queuePreview(60);});preview.addEventListener('error',function(){previewBusy=false;setStatus('CAMERA PREVIEW FAILED',true);queuePreview(300);});queuePreview(0);}})();</script>");
+  if (cameraReady) {
+    html += F("<script>(function(){var preview=document.getElementById('camera-preview-ws');if(!preview||!('WebSocket' in window))return;var previewUrl='';var statusEl=document.getElementById('control-status');var scheme=location.protocol==='https:'?'wss://':'ws://';var ws=new WebSocket(scheme+location.hostname+':82/');ws.binaryType='arraybuffer';ws.onopen=function(){if(statusEl){statusEl.textContent='CAMERA WS OK';statusEl.style.color='var(--muted)';}};ws.onerror=function(){if(statusEl){statusEl.textContent='CAMERA WS FAILED';statusEl.style.color='var(--warn)';}};ws.onclose=function(){if(statusEl){statusEl.textContent='CAMERA WS CLOSED';statusEl.style.color='var(--warn)';}};ws.onmessage=function(event){if(!(event.data instanceof ArrayBuffer))return;var blob=new Blob([event.data],{type:'image/jpeg'});var url=URL.createObjectURL(blob);preview.onload=function(){if(previewUrl)URL.revokeObjectURL(previewUrl);previewUrl=url;};preview.src=url;};})();</script>");
+  }
+  html += F("</section>");
+  html += pageEnd();
+  server.send(200, F("text/html; charset=utf-8"), html);
+}
+
 String otaNextCheckText() {
   int32_t remaining = static_cast<int32_t>(nextMcuOtaCheckAtMs - millis());
   if (remaining <= 0) return F("即将检查");
@@ -2757,7 +2927,7 @@ String otaNextCheckText() {
 void sendOtaPage(const String &notice = "") {
   String html = pageStart(F("OTA"));
   html += F("<section class='panel'><p class='meta'>HStudio ESP-SparkBot</p><h1>OTA</h1><p class='lead'>固件在线升级</p>");
-  html += F("<nav class='tabs'><a class='tab' href='/device'>设备</a><a class='tab active' href='/ota'>OTA</a></nav>");
+  html += F("<nav class='tabs'><a class='tab' href='/device'>设备</a><a class='tab' href='/control'>控制</a><a class='tab active' href='/ota'>OTA</a></nav>");
   if (notice.length() > 0) {
     html += F("<p class='hint'>");
     html += escapeHtml(notice);
@@ -2830,6 +3000,120 @@ void handleOtaCheck() {
 void scanAndSendStatusPage() {
   scanLanDevices();
   sendStatusPage();
+}
+
+void handleChassisControl() {
+  String action = server.arg(F("action"));
+  action.trim();
+  if (!chassisUartReady) {
+    sendControlPage(F("底座串口未就绪"), false);
+    return;
+  }
+
+  String notice;
+  bool ok = true;
+  if (action == F("forward")) {
+    executeChassisTool(F("self.chassis.go_forward"), String());
+    notice = F("已发送前进指令");
+  } else if (action == F("back")) {
+    executeChassisTool(F("self.chassis.go_back"), String());
+    notice = F("已发送后退指令");
+  } else if (action == F("left")) {
+    executeChassisTool(F("self.chassis.turn_left"), String());
+    notice = F("已发送左转指令");
+  } else if (action == F("right")) {
+    executeChassisTool(F("self.chassis.turn_right"), String());
+    notice = F("已发送右转指令");
+  } else if (action == F("dance")) {
+    executeChassisTool(F("self.chassis.dance"), String());
+    notice = F("已发送跳舞指令");
+  } else if (action == F("light_next")) {
+    executeChassisTool(F("self.chassis.switch_light_mode"), String());
+    notice = String(F("已切换到灯效 w")) + String(chassisLightMode);
+  } else if (action == F("light_set")) {
+    int rawMode = server.arg(F("mode")).toInt();
+    if (!sendChassisLightMode(static_cast<uint8_t>(rawMode))) {
+      ok = false;
+      notice = F("灯效编号无效，请选择 2 到 8");
+    } else {
+      notice = String(F("已应用灯效 w")) + String(chassisLightMode);
+    }
+  } else if (action == F("stop")) {
+    sendChassisCommand("x0.0 y0.0");
+    notice = F("已发送停止指令");
+  } else {
+    ok = false;
+    notice = F("未知控制动作");
+  }
+  sendControlPage(notice, ok);
+}
+
+void handleChassisControlCommand() {
+  if (!chassisUartReady) {
+    server.send(503, F("text/plain; charset=utf-8"), F("底座串口未就绪"));
+    return;
+  }
+
+  String action = server.arg(F("action"));
+  action.trim();
+  String response;
+  int status = 200;
+  if (action == F("vector")) {
+    float x = server.arg(F("x")).toFloat();
+    float y = server.arg(F("y")).toFloat();
+    sendChassisVector(x, y);
+    response = String(F("MOVE x=")) + String(x, 2) + F(" y=") + String(y, 2);
+  } else if (action == F("path")) {
+    float delta = server.arg(F("delta")).toFloat();
+    if (!sendChassisPathCorrection(delta)) {
+      status = 400;
+      response = F("路径校准参数无效");
+    } else {
+      response = String(F("PATH ")) + String(delta, 2);
+    }
+  } else if (action == F("light_set")) {
+    int rawMode = server.arg(F("mode")).toInt();
+    if (!sendChassisLightMode(static_cast<uint8_t>(rawMode))) {
+      status = 400;
+      response = F("灯效编号无效，请选择 2 到 8");
+    } else {
+      response = String(F("LIGHT w")) + String(chassisLightMode);
+    }
+  } else if (action == F("light_next")) {
+    uint8_t nextMode = chassisLightMode >= 7 ? 2 : static_cast<uint8_t>(chassisLightMode + 1);
+    if (!sendChassisLightMode(nextMode)) {
+      status = 400;
+      response = F("切换灯效失败");
+    } else {
+      response = String(F("LIGHT w")) + String(chassisLightMode);
+    }
+  } else if (action == F("dance")) {
+    sendChassisCommand("d1");
+    setLocalPetOverrideState(F("jumping"), kLocalPetDanceHoldMs);
+    response = F("DANCE");
+  } else if (action == F("stop")) {
+    sendChassisVector(0.0f, 0.0f);
+    response = F("STOP");
+  } else {
+    status = 400;
+    response = F("未知控制动作");
+  }
+  server.send(status, F("text/plain; charset=utf-8"), response);
+}
+
+void handleCameraJpeg() {
+  if (!cameraReady) {
+    server.send(503, F("text/plain; charset=utf-8"), F("camera unavailable"));
+    return;
+  }
+  camera_fb_t *frame = esp_camera_fb_get();
+  if (!frame) {
+    server.send(500, F("text/plain; charset=utf-8"), F("camera capture failed"));
+    return;
+  }
+  server.sendHeader(F("Cache-Control"), F("no-store, no-cache, must-revalidate"));
+  server.send_P(200, "image/jpeg", reinterpret_cast<const char *>(frame->buf), frame->len);
+  esp_camera_fb_return(frame);
 }
 
 void addManualDevice() {
@@ -3289,6 +3573,139 @@ String base64Encode(const uint8_t *data, size_t length) {
   output = buffer;
   delete[] buffer;
   return output;
+}
+
+void initializeCameraPreviewWs() {
+  cameraPreviewWsServer.begin();
+  cameraPreviewWsServer.setNoDelay(true);
+}
+
+bool sendCameraPreviewWsFrame(uint8_t opcode, const uint8_t *data, size_t length) {
+  if (!cameraPreviewWsClient || !cameraPreviewWsClient.connected()) return false;
+  uint8_t header[10];
+  size_t headerLen = 0;
+  header[headerLen++] = static_cast<uint8_t>(0x80 | (opcode & 0x0F));
+  if (length < 126) {
+    header[headerLen++] = static_cast<uint8_t>(length);
+  } else if (length <= 0xFFFF) {
+    header[headerLen++] = 126;
+    header[headerLen++] = static_cast<uint8_t>((length >> 8) & 0xFF);
+    header[headerLen++] = static_cast<uint8_t>(length & 0xFF);
+  } else {
+    header[headerLen++] = 127;
+    for (int shift = 56; shift >= 0; shift -= 8) {
+      header[headerLen++] = static_cast<uint8_t>((static_cast<uint64_t>(length) >> shift) & 0xFF);
+    }
+  }
+  if (cameraPreviewWsClient.write(header, headerLen) != static_cast<int>(headerLen)) return false;
+  return cameraPreviewWsClient.write(data, length) == static_cast<int>(length);
+}
+
+void closeCameraPreviewWsClient() {
+  if (cameraPreviewWsClient) cameraPreviewWsClient.stop();
+  cameraPreviewWsReady = false;
+}
+
+void acceptCameraPreviewWsClient() {
+  WiFiClient candidate = cameraPreviewWsServer.available();
+  if (!candidate) return;
+
+  String request;
+  uint32_t started = millis();
+  while (candidate.connected() && millis() - started < 1000) {
+    while (candidate.available() > 0) {
+      char c = static_cast<char>(candidate.read());
+      request += c;
+      if (request.endsWith("\r\n\r\n")) break;
+    }
+    if (request.endsWith("\r\n\r\n")) break;
+    yield();
+  }
+
+  int keyIndex = request.indexOf(F("Sec-WebSocket-Key:"));
+  if (keyIndex < 0) {
+    candidate.stop();
+    return;
+  }
+  int keyLineEnd = request.indexOf('\n', keyIndex);
+  String key = request.substring(keyIndex + 18, keyLineEnd >= 0 ? keyLineEnd : request.length());
+  key.trim();
+  if (key.length() == 0) {
+    candidate.stop();
+    return;
+  }
+
+  String acceptSeed = key + F("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+  unsigned char sha1[20];
+  mbedtls_sha1(reinterpret_cast<const unsigned char *>(acceptSeed.c_str()), acceptSeed.length(), sha1);
+  String accept = base64Encode(sha1, sizeof(sha1));
+
+  candidate.print(F("HTTP/1.1 101 Switching Protocols\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    "Sec-WebSocket-Accept: "));
+  candidate.print(accept);
+  candidate.print(F("\r\n\r\n"));
+
+  closeCameraPreviewWsClient();
+  cameraPreviewWsClient = candidate;
+  cameraPreviewWsReady = true;
+  lastCameraPreviewFrameAtMs = 0;
+}
+
+void serviceCameraPreviewWsInbound() {
+  if (!cameraPreviewWsClient || !cameraPreviewWsClient.connected()) {
+    cameraPreviewWsReady = false;
+    return;
+  }
+  while (cameraPreviewWsClient.available() >= 2) {
+    uint8_t header[2];
+    if (cameraPreviewWsClient.read(header, 2) != 2) return;
+    uint8_t opcode = header[0] & 0x0F;
+    bool masked = (header[1] & 0x80) != 0;
+    uint64_t length = header[1] & 0x7F;
+    if (length == 126) {
+      uint8_t ext[2];
+      if (cameraPreviewWsClient.read(ext, 2) != 2) return;
+      length = (static_cast<uint64_t>(ext[0]) << 8) | ext[1];
+    } else if (length == 127) {
+      uint8_t ext[8];
+      if (cameraPreviewWsClient.read(ext, 8) != 8) return;
+      length = 0;
+      for (uint8_t byte : ext) length = (length << 8) | byte;
+    }
+    uint8_t mask[4] = {};
+    if (masked && cameraPreviewWsClient.read(mask, 4) != 4) return;
+    while (length > 0 && cameraPreviewWsClient.available() > 0) {
+      cameraPreviewWsClient.read();
+      --length;
+    }
+    if (opcode == 0x8) {
+      closeCameraPreviewWsClient();
+      return;
+    }
+    if (opcode == 0x9) {
+      static const uint8_t pongByte = 0;
+      sendCameraPreviewWsFrame(0xA, &pongByte, 0);
+    }
+  }
+}
+
+void tickCameraPreviewWs() {
+  acceptCameraPreviewWsClient();
+  serviceCameraPreviewWsInbound();
+  if (!cameraPreviewWsReady || !cameraReady || !cameraPreviewWsClient || !cameraPreviewWsClient.connected()) return;
+  if (millis() - lastCameraPreviewFrameAtMs < kCameraPreviewFrameIntervalMs) return;
+
+  camera_fb_t *frame = esp_camera_fb_get();
+  if (!frame) return;
+  bool sent = sendCameraPreviewWsFrame(0x2, frame->buf, frame->len);
+  esp_camera_fb_return(frame);
+  if (!sent) {
+    closeCameraPreviewWsClient();
+    return;
+  }
+  lastCameraPreviewFrameAtMs = millis();
 }
 
 void sendWsJson(uint8_t, const String &json) {
@@ -6305,6 +6722,10 @@ void setupRoutes() {
   server.on(F("/device/profile"), HTTP_POST, saveProfile);
   server.on(F("/device/active"), HTTP_GET, setActiveDevice);
   server.on(F("/device/logout"), HTTP_GET, logoutDevice);
+  server.on(F("/control"), HTTP_GET, []() { sendControlPage(); });
+  server.on(F("/control"), HTTP_POST, handleChassisControl);
+  server.on(F("/control/command"), HTTP_POST, handleChassisControlCommand);
+  server.on(F("/camera.jpg"), HTTP_GET, handleCameraJpeg);
   server.on(F("/ota"), HTTP_GET, []() { sendOtaPage(); });
   server.on(F("/ota/check"), HTTP_POST, handleOtaCheck);
   server.on(F("/wifi"), HTTP_GET, sendWifiPage);
@@ -6457,6 +6878,7 @@ void setup() {
   Wire.setClock(100000);
   initLcdDisplay();
   initAudioHardware();
+  initializeCamera();
   initializeWakeWord();
   prefs.begin("mcu", true);
   outputVolumePercent = prefs.getUChar("volume", 100);
@@ -6476,6 +6898,7 @@ void setup() {
   } else if (!connectSavedWifi()) {
     startSetupAp(false);
   }
+  initializeCameraPreviewWs();
   setupRoutes();
   startActivePetTask();
   if (wifiReady && !setupApMode) {
@@ -6500,6 +6923,7 @@ void loop() {
     ESP_LOGI("WAKE", "listener reset after voice turn");
   }
 
+  tickCameraPreviewWs();
   server.handleClient();
   if (wsReady) mcuSocketLoop();
   if (wifiReady && WiFi.status() == WL_CONNECTED && activeDeviceUrl.length() > 0 &&
