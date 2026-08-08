@@ -55,3 +55,12 @@ MultiNet. On recognition it starts a four-second Socket.IO voice-stream capture
 without a button hold. The selected ESP-SR MultiNet model must support that
 command; the serial log reports a missing model at boot and button/touch voice
 turns remain available in that case.
+
+## Interrupting playback
+
+While MCU TTS audio is playing, the wake-word task continues sampling the
+microphone. Detecting `小方小方` stops the current playback, clears queued
+audio, sends the existing `mcu.interrupt` event, and starts a new voice turn.
+This is wake-word interruption, not arbitrary speech interruption; reliable
+arbitrary-speech detection during playback requires AEC-capable audio
+processing for this board.

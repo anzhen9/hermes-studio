@@ -2037,6 +2037,16 @@ void shapePcmBuffer(uint8_t *buffer, size_t length) {
 }
 
 bool shouldInterruptAudioForVoice() {
+  if (mcuAudioPlaying && wakeWordDetectedPending) {
+    wakeWordDetectedPending = false;
+    mcuVoiceAfterAudioInterrupt = true;
+    mcuAudioStopOnlyAfterInterrupt = false;
+    mcuSessionClearAfterAudioInterrupt = false;
+    wakeWordListeningEnabled = false;
+    audioInterruptPressStartedAtMs = 0;
+    return true;
+  }
+
   bool pressed = digitalRead(kPinBoot) == LOW;
   uint32_t now = millis();
   if (!bootInputArmed) return false;
@@ -6794,8 +6804,11 @@ void initializeWakeWord() {
 }
 
 void tickWakeWord() {
-  if (!wakeWordListeningEnabled || !wakeWordReady || audioBusy || mcuAudioPlaying || !wifiReady) return;
-  if (i2sSampleRate != kVoiceInputSampleRate && !setI2sSampleRate(kVoiceInputSampleRate)) return;
+  if (!wakeWordListeningEnabled || !wakeWordReady || audioBusy || !wifiReady) return;
+  const uint32_t inputSampleRate = mcuAudioPlaying
+      ? (i2sSampleRate > 0 ? i2sSampleRate : kMcuAudioDefaultSampleRate)
+      : kVoiceInputSampleRate;
+  if (!mcuAudioPlaying && i2sSampleRate != inputSampleRate && !setI2sSampleRate(inputSampleRate)) return;
 
   constexpr size_t kReadBytes = 512;
   uint8_t readBuffer[kReadBytes];
@@ -6809,8 +6822,8 @@ void tickWakeWord() {
     const int32_t mixed = (static_cast<int32_t>(samples[index]) + samples[index + 1]) / 2;
     const int16_t mono = shapeVoiceInputSample(static_cast<int16_t>(mixed));
     wakeWordResamplePhase += wakeWordSampleRate;
-    if (wakeWordResamplePhase >= kVoiceInputSampleRate) {
-      wakeWordResamplePhase -= kVoiceInputSampleRate;
+    if (wakeWordResamplePhase >= inputSampleRate) {
+      wakeWordResamplePhase -= inputSampleRate;
       wakeWordSamples.push_back(mono);
     }
   }
