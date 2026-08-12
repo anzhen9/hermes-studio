@@ -1,8 +1,11 @@
 import type { Context } from 'koa'
 import { getActiveProfileName } from '../../services/hermes/hermes-profile'
 import { logger } from '../../services/logger'
-import { PetAdoptionError, adoptPetFromPetdex, getActivePet, getActivePetSprite, updateActivePetPreferences } from '../../services/hermes/pets'
+import { MultipartParseError, parseMultipartBoundary, parseMultipartFilename, splitMultipart } from '../../lib/multipart'
+import { PetAdoptionError, adoptInstalledPet, adoptPetFromPetdex, deleteInstalledPet, getActivePet, getActivePetSprite, getLocalPetAsset, getLocalPetPreview, importLocalPet, listInstalledPets, updateActivePetPreferences } from '../../services/hermes/pets'
 import { getPetStateSnapshot } from '../../services/hermes/pet-state-socket'
+
+const MAX_PET_UPLOAD_BYTES = 10 * 1024 * 1024
 
 function requestedProfile(ctx: Context): string {
   return ctx.state.profile?.name || getActiveProfileName() || 'default'
@@ -48,7 +51,8 @@ export async function adopt(ctx: Context) {
   }
 
   try {
-    ctx.body = { pet: await adoptPetFromPetdex(profile, slug) }
+    // Prefer locally installed pets (e.g. imported pets); fall back to petdex.
+    ctx.body = { pet: await adoptInstalledPet(profile, slug).catch(() => adoptPetFromPetdex(profile, slug)) }
   } catch (err) {
     logger.warn({ err, slug, profile }, '[pets] adopt failed')
     const message = errorMessage(err)
@@ -82,4 +86,145 @@ export async function updateActive(ctx: Context) {
       : undefined,
   })
   ctx.body = { pet }
+}
+
+export async function listLocal(ctx: Context) {
+  ctx.body = { pets: await listInstalledPets(requestedProfile(ctx)) }
+}
+
+export async function localAsset(ctx: Context) {
+  const slug = typeof ctx.params?.slug === 'string' ? ctx.params.slug.trim() : ''
+  if (!slug) {
+    ctx.status = 400
+    ctx.body = { error: 'Pet slug is required' }
+    return
+  }
+  const asset = await getLocalPetAsset(requestedProfile(ctx), slug)
+  if (!asset) {
+    ctx.status = 404
+    ctx.body = { error: 'Local pet asset not found' }
+    return
+  }
+  ctx.set('Content-Type', asset.mime)
+  ctx.set('Cache-Control', 'public, max-age=60')
+  ctx.body = asset.buffer
+}
+
+export async function localPreview(ctx: Context) {
+  const slug = typeof ctx.params?.slug === 'string' ? ctx.params.slug.trim() : ''
+  if (!slug) {
+    ctx.status = 400
+    ctx.body = { error: 'Pet slug is required' }
+    return
+  }
+  const preview = await getLocalPetPreview(requestedProfile(ctx), slug)
+  if (!preview) {
+    ctx.status = 404
+    ctx.body = { error: 'Local pet preview not found' }
+    return
+  }
+  ctx.set('Content-Type', preview.mime)
+  ctx.set('Cache-Control', 'public, max-age=60')
+  ctx.body = preview.buffer
+}
+
+export async function deleteLocal(ctx: Context) {
+  const slug = typeof ctx.params?.slug === 'string' ? ctx.params.slug.trim() : ''
+  if (!slug) {
+    ctx.status = 400
+    ctx.body = { error: 'Pet slug is required' }
+    return
+  }
+  const profile = requestedProfile(ctx)
+  try {
+    const result = await deleteInstalledPet(profile, slug)
+    ctx.body = result
+  } catch (err) {
+    logger.warn({ err, slug, profile }, '[pets] local pet delete failed')
+    const message = errorMessage(err)
+    ctx.status = message.includes('was not found') ? 404 : 400
+    ctx.body = { error: message }
+  }
+}
+
+export async function importPet(ctx: Context) {
+  const contentType = ctx.get('content-type') || ''
+  if (!contentType.startsWith('multipart/form-data')) {
+    ctx.status = 400
+    ctx.body = { error: 'Expected multipart/form-data' }
+    return
+  }
+  const boundary = parseMultipartBoundary(contentType)
+  if (!boundary) {
+    ctx.status = 400
+    ctx.body = { error: 'Missing boundary' }
+    return
+  }
+
+  const chunks: Buffer[] = []
+  let totalSize = 0
+  for await (const chunk of ctx.req) {
+    totalSize += chunk.length
+    if (totalSize > MAX_PET_UPLOAD_BYTES) {
+      ctx.status = 413
+      ctx.body = { error: 'Pet assets exceed the 10 MB limit' }
+      return
+    }
+    chunks.push(chunk)
+  }
+
+  const parts: Array<{ fieldName: string; filename: string | null; data: Buffer }> = []
+  for (const part of splitMultipart(Buffer.concat(chunks), boundary)) {
+    const headerEnd = part.indexOf(Buffer.from('\r\n\r\n'))
+    if (headerEnd === -1) continue
+    const header = part.subarray(0, headerEnd).toString('utf-8')
+    const data = part.subarray(headerEnd + 4, part.length > 2 ? part.length - 2 : part.length)
+    const nameMatch = header.match(/\bname="([^"]+)"/)
+    if (!nameMatch) continue
+    let filename: string | null = null
+    try {
+      filename = parseMultipartFilename(header)
+    } catch (error) {
+      if (error instanceof MultipartParseError) {
+        ctx.status = 400
+        ctx.body = { error: error.message }
+        return
+      }
+      throw error
+    }
+    parts.push({ fieldName: nameMatch[1], filename, data })
+  }
+
+  const textField = (name: string) => {
+    const part = parts.find(p => p.fieldName === name && p.filename === null)
+    return part ? part.data.toString('utf-8').trim() : ''
+  }
+
+  const spritesheetPart = parts.find(p => p.fieldName === 'spritesheet' && p.filename !== null)
+  const petJsonPart = parts.find(p => p.fieldName === 'petJson' && p.filename !== null)
+
+  if (!spritesheetPart) {
+    ctx.status = 400
+    ctx.body = { error: 'Spritesheet file is required' }
+    return
+  }
+
+  const profile = requestedProfile(ctx)
+  try {
+    const pet = await importLocalPet(profile, {
+      slug: textField('slug') || textField('displayName'),
+      displayName: textField('displayName'),
+      kind: textField('kind'),
+      submittedBy: textField('submittedBy'),
+      spritesheet: spritesheetPart.data,
+      spritesheetFilename: spritesheetPart.filename || 'spritesheet.png',
+      petJson: petJsonPart ? petJsonPart.data.toString('utf-8') : null,
+    })
+    ctx.status = 201
+    ctx.body = { pet }
+  } catch (err) {
+    logger.warn({ err, profile }, '[pets] local import failed')
+    ctx.status = 400
+    ctx.body = { error: err instanceof Error ? err.message : 'Pet import failed' }
+  }
 }
