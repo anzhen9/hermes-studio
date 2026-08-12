@@ -11,7 +11,12 @@ import { encodeMcuImaAdpcm } from '../hermes/mcu-adpcm'
 import { MCU_TTS_SAMPLE_RATE, mcuPromptText, mcuPromptUrl } from '../hermes/mcu-prompts'
 import { matchMcuChassisCommand } from './mcu-chassis-command'
 import { createMcuSpeechSegmenter, normalizeMcuSpeechText } from './mcu-speech-segmenter'
-import { MCU_VOICE_SYSTEM_INSTRUCTIONS } from './mcu-voice-instructions'
+import {
+  DEFAULT_MCU_AGENT_RUNTIME,
+  mcuChatRunFields,
+  normalizeMcuAgentRuntime,
+  type McuAgentRuntime,
+} from './mcu-agent-runtime'
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 const MAX_REQUEST_TIMEOUT_MS = 120_000
@@ -43,6 +48,7 @@ const ALLOWED_CHAT_RUN_CLIENT_EVENTS = new Set([
   'resume',
   'abort',
   'cancel_queued_run',
+  'insert_queued_run',
   'approval.respond',
   'clarify.respond',
 ])
@@ -70,6 +76,7 @@ const CHAT_RUN_SERVER_EVENTS = [
   'session.command',
   'session.title.updated',
   'run.queued',
+  'run.queue_insertion.updated',
   'approval.requested',
   'approval.resolved',
   'clarify.requested',
@@ -206,6 +213,7 @@ interface McuVoiceMeta {
   mimeType: string
   bytes: number
   profile: string
+  agentRuntime: McuAgentRuntime
 }
 
 interface RelayMcuBackgroundListener {
@@ -638,6 +646,7 @@ class McuSocketIoRelayClient {
         mimeType: typeof event.mimeType === 'string' && event.mimeType.trim() ? event.mimeType.trim() : 'audio/wav',
         bytes: Number.isFinite(Number(event.bytes)) ? Number(event.bytes) : 0,
         profile: typeof event.profile === 'string' && event.profile.trim() ? event.profile.trim() : 'default',
+        agentRuntime: normalizeMcuAgentRuntime(event.agentRuntime),
       }
       return
     }
@@ -648,6 +657,7 @@ class McuSocketIoRelayClient {
         mimeType: typeof event.mimeType === 'string' && event.mimeType.trim() ? event.mimeType.trim() : 'audio/pcm',
         bytes: 0,
         profile: typeof event.profile === 'string' && event.profile.trim() ? event.profile.trim() : 'default',
+        agentRuntime: normalizeMcuAgentRuntime(event.agentRuntime),
         sampleRate: Number.isFinite(Number(event.sampleRate)) ? Number(event.sampleRate) : MCU_TTS_SAMPLE_RATE,
         channels: Number(event.channels) === 1 ? 1 : 2,
         bitsPerSample: Number(event.bitsPerSample) === 16 ? 16 : 16,
@@ -811,6 +821,7 @@ class McuSocketIoRelayClient {
           Authorization: `Bearer ${this.options.userToken}`,
           'Content-Type': voice.mimeType,
           'X-Hermes-Mcu-Interaction-Id': voice.interactionId,
+          'X-Hermes-Mcu-Agent-Runtime': voice.agentRuntime,
           'X-Hermes-Profile': voice.profile,
         },
         body: new Uint8Array(audio),
@@ -886,11 +897,11 @@ class McuSocketIoRelayClient {
   }
 
   private async runChatFromTranscript(
-    voice: { interactionId: string; profile: string },
+    voice: { interactionId: string; profile: string; agentRuntime: McuAgentRuntime },
     transcript: string,
   ): Promise<void> {
     await new Promise<void>((resolve) => {
-      const sessionId = this.mcuSessionId(voice.profile)
+      const sessionId = this.mcuSessionId(voice.profile, voice.agentRuntime)
       const primaryQueueId = `mcu_${randomUUID()}`
       this.interruptedInteractions.delete(voice.interactionId)
       const socket: Socket = io(`${this.options.localBaseUrl.replace(/\/$/, '')}/chat-run`, {
@@ -1064,10 +1075,7 @@ class McuSocketIoRelayClient {
           session_id: sessionId,
           queue_id: primaryQueueId,
           profile: voice.profile,
-          source: 'coding_agent',
-          session_source: 'global_agent',
-          coding_agent_id: 'ekko-agent',
-          instructions: MCU_VOICE_SYSTEM_INSTRUCTIONS,
+          ...mcuChatRunFields(voice.agentRuntime),
         }
         const interruptedAt = this.recentlyInterruptedSessions.get(sessionId) || 0
         if (Date.now() - interruptedAt < 10_000) {
@@ -1514,7 +1522,7 @@ class McuSocketIoRelayClient {
     })
   }
 
-  private mcuSessionId(profile: string): string {
+  private mcuSessionId(profile: string, agentRuntime: McuAgentRuntime = DEFAULT_MCU_AGENT_RUNTIME): string {
     const instance = (this.options.instanceId || 'device')
       .toLowerCase()
       .replace(/[^a-z0-9_-]+/g, '-')
@@ -1525,7 +1533,7 @@ class McuSocketIoRelayClient {
       .replace(/[^a-z0-9_-]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .slice(0, 64) || 'default'
-    return `mcu-${instance}-${profileId}`
+    return `mcu-${instance}-${profileId}-${agentRuntime}`
   }
 
   private async enqueueMcuSpeechSegment(

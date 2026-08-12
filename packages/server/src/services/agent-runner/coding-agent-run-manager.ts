@@ -107,6 +107,7 @@ interface ManagedCodingAgentRun {
   codexToolBlocks?: Map<string, { id: string; name: string; arguments: string; done: boolean }>
   codexChatText?: string
   codexPendingUsage?: any
+  codexPendingError?: string
   terminalUsageRefresh?: Promise<void>
   stoppedByUser?: boolean
   pendingChatCompletionEvent?: 'run.completed' | 'run.failed'
@@ -577,7 +578,7 @@ export class CodingAgentRunManager {
     return { runId: run.id, pid: proc.pid }
   }
 
-  send(sessionId: string, input: string, options: CodingAgentRunSendOptions = {}): { runId: string } {
+  send(sessionId: string, input: string, options: CodingAgentRunSendOptions = {}): { runId: string; messageId?: number } {
     const run = this.getBySession(sessionId)
     if (!run) throw new Error('Coding agent session not found')
     const text = String(input || '').trim()
@@ -586,21 +587,21 @@ export class CodingAgentRunManager {
     const systemPrompt = String(options.systemPrompt || '').trim()
     this.ensureDbSession(run)
     run.assistantMessageId = undefined
-    this.addUserMessage(run, options.storageInput ?? text)
+    const messageId = this.addUserMessage(run, options.storageInput ?? text)
     this.touch(run)
     this.emitTerminalStatus(run, 'Input sent to coding agent.')
     this.startWorkspaceRunDiff(run)
     if (run.launch.agentId === 'claude-code') {
       this.startClaudePrintTurn(run, text, systemPrompt, images)
-      return { runId: run.id }
+      return { runId: run.id, messageId }
     }
     if (run.launch.agentId === 'codex') {
       this.startCodexExecTurn(run, text, systemPrompt, images)
-      return { runId: run.id }
+      return { runId: run.id, messageId }
     }
     if (!run.pty) throw new Error('Coding agent terminal is not available')
     run.pty.write(`${text}\r`)
-    return { runId: run.id }
+    return { runId: run.id, messageId }
   }
 
   stop(sessionId: string, options: { reportClosed?: boolean } = {}): boolean {
@@ -845,6 +846,7 @@ export class CodingAgentRunManager {
     })
     const id = addMessage({ session_id: run.launch.sessionId, role: 'user', content, timestamp })
     logger.debug({ runId: run.id, sessionId: run.launch.sessionId, messageId: id }, '[coding-agent-run] recorded user message')
+    return id
   }
 
   private touch(run: ManagedCodingAgentRun) {
@@ -1365,6 +1367,7 @@ export class CodingAgentRunManager {
     run.printMessageId = `msg_${responseId}`
     run.printTextStarted = false
     run.printText = ''
+    run.codexPendingError = undefined
     run.printCompleted = false
     run.responseStartEmitted = false
     run.terminalEventHandled = false
@@ -1456,29 +1459,33 @@ export class CodingAgentRunManager {
       run.currentChildKillTimer = undefined
       run.currentChild = undefined
       logger.info({ runId: run.id, sessionId: run.launch.sessionId, code }, '[coding-agent-run] codex exec exited')
-      if (run.stoppedByUser) return
-      if (run.pendingChatCompletionEvent) {
-        void this.emitAndMarkPrintChatRunCompletedAfterUsage(run, run.pendingChatCompletionEvent, run.pendingChatCompletionPayload)
-        return
-      }
-      if (code === 0) {
-        this.completeCodexExecTurn(run, run.codexPendingUsage)
-        return
-      }
-      this.handleClaudePrintResponseEvent(run, {
+      this.finishCodexExecTurn(run, code)
+    })
+  }
+
+  private finishCodexExecTurn(run: ManagedCodingAgentRun, code: number | null) {
+    if (run.stoppedByUser) return
+    if (run.pendingChatCompletionEvent) {
+      void this.emitAndMarkPrintChatRunCompletedAfterUsage(run, run.pendingChatCompletionEvent, run.pendingChatCompletionPayload)
+      return
+    }
+    if (code === 0) {
+      this.completeCodexExecTurn(run, run.codexPendingUsage)
+      return
+    }
+    this.handleClaudePrintResponseEvent(run, {
+      type: 'response.failed',
+      data: {
         type: 'response.failed',
-        data: {
-          type: 'response.failed',
-          response: {
-            id: run.printResponseId,
-            object: 'response',
-            status: 'failed',
-            model: run.launch.model,
-            error: { message: exitErrorMessage('Codex', code, run.currentChildStderr) },
-            output: [],
-          },
+        response: {
+          id: run.printResponseId,
+          object: 'response',
+          status: 'failed',
+          model: run.launch.model,
+          error: { message: run.codexPendingError || exitErrorMessage('Codex', code, run.currentChildStderr) },
+          output: [],
         },
-      })
+      },
     })
   }
 
@@ -1528,8 +1535,12 @@ export class CodingAgentRunManager {
       run.codexPendingUsage = event.usage
       return
     }
-    if (type === 'turn.failed' || type === 'error') {
+    if (type === 'turn.failed') {
       this.failCodexExecTurn(run, event.error?.message || event.message || 'Codex run failed')
+      return
+    }
+    if (type === 'error') {
+      this.deferCodexExecError(run, event.error?.message || event.message || 'Codex run failed')
     }
   }
 
@@ -1564,9 +1575,24 @@ export class CodingAgentRunManager {
       run.codexPendingUsage = params.usage
       return
     }
-    if (method === 'turn/failed' || method === 'error') {
+    if (method === 'turn/failed') {
       this.failCodexExecTurn(run, params.error?.message || params.message || 'Codex run failed')
+      return
     }
+    if (method === 'error') {
+      this.deferCodexExecError(run, params.error?.message || params.message || 'Codex run failed')
+    }
+  }
+
+  private deferCodexExecError(run: ManagedCodingAgentRun, message: string) {
+    // Codex emits broad `error` events for recoverable stream retries as well as
+    // failures. Let the native process exit status arbitrate the turn: exit 0
+    // discards this provisional error, while a non-zero exit reports it.
+    if (childIsRunning(run.currentChild)) {
+      run.codexPendingError = message
+      return
+    }
+    this.failCodexExecTurn(run, message)
   }
 
   private failCodexExecTurn(run: ManagedCodingAgentRun, message: string) {
@@ -1869,6 +1895,7 @@ export class CodingAgentRunManager {
     const workspaceRunChange = this.completeWorkspaceRunDiff(run)
     this.emitToChat(run.launch.sessionId, event, {
       ...(payload || { event }),
+      ...(run.assistantMessageId ? { message_id: run.assistantMessageId } : {}),
       ...(queueRemaining > 0 ? { queue_remaining: queueRemaining } : {}),
       workspace_run_change: workspaceRunChange,
     })
