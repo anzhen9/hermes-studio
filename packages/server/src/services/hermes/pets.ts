@@ -1,6 +1,6 @@
 import { existsSync } from 'fs'
-import { mkdir, readFile, writeFile } from 'fs/promises'
-import { dirname, join } from 'path'
+import { mkdir, readFile, readdir, rm, writeFile } from 'fs/promises'
+import { dirname, extname, join } from 'path'
 import { createRequire } from 'node:module'
 import type { OverlayOptions } from 'sharp'
 import type sharpDefault from 'sharp'
@@ -16,7 +16,7 @@ export interface InstalledPet {
   displayName: string
   kind: string
   submittedBy: string
-  source: 'petdex'
+  source: 'petdex' | 'local'
   spritesheetUrl: string
   petJsonUrl: string
   zipUrl: string
@@ -44,7 +44,7 @@ export interface ActivePetResponse {
   displayName: string
   kind: string
   submittedBy: string
-  source: 'petdex'
+  source: 'petdex' | 'local'
   mime: string
   spritesheetDataUrl?: string
   spritesheetRevision: number
@@ -373,6 +373,47 @@ export async function getActivePet(profile: string, options: { lightweight?: boo
   return buildActivePetResponse(profile, installed, active, options)
 }
 
+/**
+ * Activate a pet that is already installed on disk (e.g. an imported local
+ * pet), without re-fetching assets from petdex. Throws if the pet is not
+ * installed for the given profile.
+ */
+export async function adoptInstalledPet(profile: string, slugInput: string): Promise<ActivePetResponse> {
+  const slug = safeSlug(slugInput)
+  const installed = await readJsonFile<InstalledPet>(petMetaPath(profile, slug))
+  if (!installed) {
+    throw new Error(`Pet "${slugInput}" was not found locally`)
+  }
+
+  const now = Date.now()
+  const active: ActivePetConfig = {
+    enabled: true,
+    slug: installed.slug,
+    scale: DEFAULT_SCALE,
+    updatedAt: now,
+  }
+  await writeJsonFile(activePetPath(profile), active)
+
+  try {
+    await getActivePetSprite(profile)
+  } catch (err) {
+    logger.warn({ err, profile, slug }, '[pets] pre-generating sparkbot sprite cache failed')
+  }
+
+  const response = await buildActivePetResponse(profile, installed, active)
+  if (!response) {
+    throw new PetAdoptionError({
+      slug: installed.slug,
+      profile,
+      stage: 'install',
+      assetUrl: installed.spritesheetUrl,
+      message: 'Installed pet asset is missing',
+    })
+  }
+  notifyMcuPetChanged(profile)
+  return response
+}
+
 export async function updateActivePetPreferences(
   profile: string,
   input: { scale?: number; position?: { x?: number; y?: number }; enabled?: boolean },
@@ -595,4 +636,273 @@ export async function getActivePetSprite(profile: string): Promise<ActivePetSpri
     logger.warn({ err, profile, slug: installed.slug, path: filePath }, '[pets] sparkbot sprite generation failed')
     return null
   }
+}
+
+export interface ImportLocalPetInput {
+  slug: string
+  displayName: string
+  kind: string
+  submittedBy: string
+  spritesheet: Buffer
+  spritesheetFilename: string
+  petJson?: string | null
+}
+
+export interface LocalImportedPet {
+  slug: string
+  displayName: string
+  kind: string
+  submittedBy: string
+  source: 'petdex' | 'local'
+  spritesheetFile: string
+  petJsonFile?: string
+  previewFile?: string
+  mime: string
+  installedAt: number
+  updatedAt: number
+}
+
+function sniffMime(data: Buffer, filename: string): string {
+  const lower = (filename || '').toLowerCase()
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+  if (lower.endsWith('.gif')) return 'image/gif'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  // PNG magic bytes
+  if (data.length >= 8 && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) return 'image/png'
+  return 'image/webp'
+}
+
+/**
+ * Import a pet from locally uploaded assets (spritesheet + optional pet.json).
+ * Writes the files into the profile's pets directory and creates the pet meta.
+ * The imported pet is installed but not automatically set as the active pet.
+ */
+export async function importLocalPet(profile: string, input: ImportLocalPetInput): Promise<LocalImportedPet> {
+  if (!input.spritesheet || input.spritesheet.length === 0) {
+    throw new Error('Pet spritesheet is required')
+  }
+  const slug = safeSlug(input.slug)
+  const mime = sniffMime(input.spritesheet, input.spritesheetFilename)
+
+  const targetDir = petDir(profile, slug)
+  await mkdir(targetDir, { recursive: true })
+
+  const spritesheetExt = extname(input.spritesheetFilename || '').toLowerCase()
+  const spritesheetFile = spritesheetExt && ['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(spritesheetExt)
+    ? `spritesheet${spritesheetExt}`
+    : mime === 'image/png' ? 'spritesheet.png' : 'spritesheet.webp'
+
+  await writeFile(join(targetDir, spritesheetFile), input.spritesheet, { mode: 0o600 })
+
+  let petJsonFile: string | undefined
+  if (input.petJson && input.petJson.trim()) {
+    petJsonFile = 'local-pet.json'
+    await writeFile(join(targetDir, petJsonFile), input.petJson, { encoding: 'utf-8', mode: 0o600 })
+  }
+
+  // Build a petdex-style preview sheet (8 cols × FRAME_W wide, FRAME_H tall)
+// with the first frame composited into column 0 and the rest transparent.
+// This makes the local list cards render with the same `background-size:
+// 800% auto` rule used for remote catalog pets, so the visible preview is
+// always a single 192×208 frame regardless of the source image layout.
+  let previewFile: string | undefined
+  try {
+    const sharp = await loadSharp()
+    const metadata = await sharp(input.spritesheet).metadata()
+    const extractWidth = Math.min(FRAME_W, metadata.width || FRAME_W)
+    const extractHeight = Math.min(FRAME_H, metadata.height || FRAME_H)
+    const firstFrame = await sharp(input.spritesheet)
+      .extract({ left: 0, top: 0, width: extractWidth, height: extractHeight })
+      .resize(FRAME_W, FRAME_H, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .png()
+      .toBuffer()
+    const sheetWidth = FRAME_W * FRAMES_PER_STATE
+    const sheetHeight = FRAME_H
+    const buffer = await sharp({
+      create: {
+        width: sheetWidth,
+        height: sheetHeight,
+        channels: 4,
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+      },
+    })
+      .composite([{ input: firstFrame, left: 0, top: 0 }])
+      .png()
+      .toBuffer()
+    previewFile = 'preview.png'
+    await writeFile(join(targetDir, previewFile), buffer, { mode: 0o600 })
+  } catch (err) {
+    logger.warn({ err, profile, slug }, '[pets] preview extraction failed for local pet')
+  }
+
+  const now = Date.now()
+  const installed: InstalledPet = {
+    slug,
+    displayName: input.displayName?.trim() || slug,
+    kind: input.kind?.trim() || 'pet',
+    submittedBy: input.submittedBy?.trim() || '',
+    source: 'local',
+    spritesheetUrl: '',
+    petJsonUrl: '',
+    zipUrl: '',
+    spritesheetFile,
+    petJsonFile,
+    mime,
+    installedAt: now,
+    updatedAt: now,
+  }
+  await writeJsonFile(petMetaPath(profile, slug), installed)
+
+  return {
+    slug,
+    displayName: installed.displayName,
+    kind: installed.kind,
+    submittedBy: installed.submittedBy,
+    source: 'local',
+    spritesheetFile,
+    petJsonFile,
+    previewFile,
+    mime,
+    installedAt: now,
+    updatedAt: now,
+  }
+}
+
+export async function listInstalledPets(profile: string): Promise<LocalImportedPet[]> {
+  const root = petsRoot(profile)
+  let entries: string[]
+  try {
+    entries = await readdir(root)
+  } catch {
+    return []
+  }
+
+  const results: LocalImportedPet[] = []
+  for (const entry of entries) {
+    if (entry === 'active.json') continue
+    const meta = await readJsonFile<InstalledPet>(petMetaPath(profile, entry))
+    if (!meta) continue
+    results.push({
+      slug: meta.slug,
+      displayName: meta.displayName,
+      kind: meta.kind,
+      submittedBy: meta.submittedBy,
+      source: meta.source,
+      spritesheetFile: meta.spritesheetFile || 'spritesheet.webp',
+      petJsonFile: meta.petJsonFile,
+      mime: meta.mime,
+      installedAt: meta.installedAt,
+      updatedAt: meta.updatedAt,
+    })
+  }
+  return results.sort((a, b) => b.installedAt - a.installedAt)
+}
+
+export async function getLocalPetAsset(profile: string, slugInput: string): Promise<{ buffer: Buffer; mime: string } | null> {
+  const slug = safeSlug(slugInput)
+  const meta = await readJsonFile<InstalledPet>(petMetaPath(profile, slug))
+  if (!meta) return null
+  const filePath = join(petDir(profile, slug), meta.spritesheetFile || 'spritesheet.webp')
+  if (!existsSync(filePath)) return null
+  return { buffer: await readFile(filePath), mime: meta.mime || mimeFromFilename(meta.spritesheetFile || 'spritesheet.webp') }
+}
+
+/**
+ * Returns a small preview of the local pet, suitable for list-card display.
+ * Prefers a dedicated `preview.png` (an 8-column sheet with only the first
+ * frame filled in) so it composes correctly with the same CSS rule used for
+ * remote catalog cards. If the preview is missing — e.g. an older import
+ * performed before this feature shipped — generates one on the fly from the
+ * stored spritesheet and caches it on disk.
+ */
+export async function getLocalPetPreview(profile: string, slugInput: string): Promise<{ buffer: Buffer; mime: string } | null> {
+  const slug = safeSlug(slugInput)
+  const meta = await readJsonFile<InstalledPet>(petMetaPath(profile, slug))
+  if (!meta) return null
+
+  const dir = petDir(profile, slug)
+  const previewPath = join(dir, 'preview.png')
+
+  if (!existsSync(previewPath)) {
+    const spritesheetPath = join(dir, meta.spritesheetFile || 'spritesheet.webp')
+    if (existsSync(spritesheetPath)) {
+      try {
+        const source = await readFile(spritesheetPath)
+        const sharp = await loadSharp()
+        const metadata = await sharp(source).metadata()
+        const extractWidth = Math.min(FRAME_W, metadata.width || FRAME_W)
+        const extractHeight = Math.min(FRAME_H, metadata.height || FRAME_H)
+        const firstFrame = await sharp(source)
+          .extract({ left: 0, top: 0, width: extractWidth, height: extractHeight })
+          .resize(FRAME_W, FRAME_H, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+          .png()
+          .toBuffer()
+        const sheetWidth = FRAME_W * FRAMES_PER_STATE
+        const sheetHeight = FRAME_H
+        const buffer = await sharp({
+          create: {
+            width: sheetWidth,
+            height: sheetHeight,
+            channels: 4,
+            background: { r: 0, g: 0, b: 0, alpha: 0 },
+          },
+        })
+          .composite([{ input: firstFrame, left: 0, top: 0 }])
+          .png()
+          .toBuffer()
+        await writeFile(previewPath, buffer, { mode: 0o600 })
+      } catch (err) {
+        logger.warn({ err, profile, slug }, '[pets] lazy preview generation failed')
+      }
+    }
+  }
+
+  if (existsSync(previewPath)) {
+    return { buffer: await readFile(previewPath), mime: 'image/png' }
+  }
+
+  const spritesheetPath = join(dir, meta.spritesheetFile || 'spritesheet.webp')
+  if (!existsSync(spritesheetPath)) return null
+  return { buffer: await readFile(spritesheetPath), mime: meta.mime || mimeFromFilename(meta.spritesheetFile || 'spritesheet.webp') }
+}
+
+export interface DeleteInstalledPetResult {
+  deleted: boolean
+  wasActive: boolean
+}
+
+export async function deleteInstalledPet(profile: string, slugInput: string): Promise<DeleteInstalledPetResult> {
+  const slug = safeSlug(slugInput)
+  const targetDir = petDir(profile, slug)
+  if (!existsSync(targetDir)) {
+    throw new Error(`Pet "${slugInput}" was not found`)
+  }
+
+  await rm(targetDir, { recursive: true, force: true })
+
+  // If the deleted pet was the active one, clear the active config so the UI
+  // doesn't point at a pet whose files no longer exist.
+  let wasActive = false
+  const active = await readJsonFile<ActivePetConfig>(activePetPath(profile))
+  if (active?.slug === slug) {
+    wasActive = true
+    await writeJsonFile(activePetPath(profile), {
+      enabled: false,
+      slug: '',
+      scale: DEFAULT_SCALE,
+      updatedAt: Date.now(),
+    })
+    notifyMcuPetChanged(profile)
+  }
+
+  return { deleted: true, wasActive }
+}
+
+function mimeFromFilename(filename: string): string {
+  const ext = extname(filename || '').toLowerCase()
+  if (ext === '.png') return 'image/png'
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+  if (ext === '.gif') return 'image/gif'
+  return 'image/webp'
 }
