@@ -414,25 +414,6 @@ export async function adoptInstalledPet(profile: string, slugInput: string): Pro
   return response
 }
 
-export async function adoptInstalledPet(profile: string, slugInput: string): Promise<ActivePetResponse> {
-  const slug = safeSlug(slugInput)
-  const installed = await readJsonFile<InstalledPet>(petMetaPath(profile, slug))
-  if (!installed) throw new Error(`Pet "${slugInput}" was not found locally`)
-
-  const now = Date.now()
-  const active: ActivePetConfig = {
-    enabled: true,
-    slug: installed.slug,
-    scale: DEFAULT_SCALE,
-    updatedAt: now,
-  }
-  await writeJsonFile(activePetPath(profile), active)
-
-  const response = await buildActivePetResponse(profile, installed, active)
-  if (!response) throw new Error('Installed pet asset is missing')
-  return response
-}
-
 export async function updateActivePetPreferences(
   profile: string,
   input: { scale?: number; position?: { x?: number; y?: number }; enabled?: boolean },
@@ -723,7 +704,6 @@ export async function importLocalPet(profile: string, input: ImportLocalPetInput
     await writeFile(join(targetDir, petJsonFile), input.petJson, { encoding: 'utf-8', mode: 0o600 })
   }
 
-<<<<<<< HEAD
   // Build a petdex-style preview sheet (8 cols × FRAME_W wide, FRAME_H tall)
 // with the first frame composited into column 0 and the rest transparent.
 // This makes the local list cards render with the same `background-size:
