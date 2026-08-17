@@ -178,32 +178,28 @@ export async function importPet(ctx: Context) {
     const headerEnd = part.indexOf(Buffer.from('\r\n\r\n'))
     if (headerEnd === -1) continue
     const header = part.subarray(0, headerEnd).toString('utf-8')
-    const data = part.subarray(headerEnd + 4, part.length > 2 ? part.length - 2 : part.length)
     const nameMatch = header.match(/\bname="([^"]+)"/)
     if (!nameMatch) continue
-    let filename: string | null = null
     try {
-      filename = parseMultipartFilename(header)
-    } catch (error) {
-      if (error instanceof MultipartParseError) {
+      parts.push({
+        fieldName: nameMatch[1],
+        filename: parseMultipartFilename(header),
+        data: part.subarray(headerEnd + 4, part.length > 2 ? part.length - 2 : part.length),
+      })
+    } catch (err) {
+      if (err instanceof MultipartParseError) {
         ctx.status = 400
-        ctx.body = { error: error.message }
+        ctx.body = { error: err.message }
         return
       }
-      throw error
+      throw err
     }
-    parts.push({ fieldName: nameMatch[1], filename, data })
   }
 
-  const textField = (name: string) => {
-    const part = parts.find(p => p.fieldName === name && p.filename === null)
-    return part ? part.data.toString('utf-8').trim() : ''
-  }
-
-  const spritesheetPart = parts.find(p => p.fieldName === 'spritesheet' && p.filename !== null)
-  const petJsonPart = parts.find(p => p.fieldName === 'petJson' && p.filename !== null)
-
-  if (!spritesheetPart) {
+  const textField = (name: string) => parts.find(part => part.fieldName === name && part.filename === null)?.data.toString('utf-8').trim() || ''
+  const spritesheet = parts.find(part => part.fieldName === 'spritesheet' && part.filename !== null)
+  const petJson = parts.find(part => part.fieldName === 'petJson' && part.filename !== null)
+  if (!spritesheet) {
     ctx.status = 400
     ctx.body = { error: 'Spritesheet file is required' }
     return
@@ -216,9 +212,9 @@ export async function importPet(ctx: Context) {
       displayName: textField('displayName'),
       kind: textField('kind'),
       submittedBy: textField('submittedBy'),
-      spritesheet: spritesheetPart.data,
-      spritesheetFilename: spritesheetPart.filename || 'spritesheet.png',
-      petJson: petJsonPart ? petJsonPart.data.toString('utf-8') : null,
+      spritesheet: spritesheet.data,
+      spritesheetFilename: spritesheet.filename || 'spritesheet.png',
+      petJson: petJson?.data.toString('utf-8') ?? null,
     })
     ctx.status = 201
     ctx.body = { pet }

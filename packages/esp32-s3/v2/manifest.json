@@ -1,0 +1,60 @@
+{
+  "name": "HStudio ESP32-S3 Wi-Fi Setup Firmware v2",
+  "firmwareVersion": "v2",
+  "version": "v2-esp32-s3-wifi-setup-st7789",
+  "buildDate": "2026-08-14",
+  "chip": "esp32s3",
+  "flashSize": "8MB",
+  "flashMode": "dio",
+  "flashFrequency": "80m",
+  "hardware": {
+    "board": "HStudio ESP32-S3 hardware with ES8311 audio and ST7789 240x240 SPI display",
+    "i2c": {
+      "sda": 40,
+      "scl": 39
+    },
+    "i2s": {
+      "dout": 4,
+      "ws": 7,
+      "din": 15,
+      "bck": 16,
+      "mck": 38
+    },
+    "userButton": 5,
+    "userButtonType": "touch-active-high",
+    "paEnable": 8,
+    "es8311Address": "0x18",
+    "display": {
+      "driver": "ST7789",
+      "bus": "spi",
+      "width": 240,
+      "height": 240,
+      "rgbOrder": "rgb",
+      "mosi": 1,
+      "sclk": 18,
+      "dc": 17,
+      "rst": 6,
+      "backlight": 2,
+      "note": "128x64 logical canvas scaled 1.875x to 240x120, vertically centered"
+    },
+    "batteryAdc": null
+  },
+  "features": [
+    "Same application logic as ESP32-C3 firmware v2",
+    "Wi-Fi setup portal",
+    "Open HStudio-WIFI setup access point",
+    "Saved Wi-Fi reconnect and reprovisioning",
+    "LAN and remote Hermes endpoint discovery",
+    "MCU login and profile selection",
+    "Socket.IO global-agent connection",
+    "ES8311 microphone and speaker audio",
+    "IMA-ADPCM voice uplink",
+    "ST7789 status UI (128x64 logical canvas on 240x240 display)",
+    "Selectable push-to-talk and local-VAD listening modes",
+    "Selectable Ekko and Hermes agent runtimes with isolated sessions",
+    "Sample-synchronized GB2312 subtitles during speech playback",
+    "Version-isolated OTA updates",
+    "Configurable connected standby with a three-minute default",
+    "AC-powered: battery telemetry reported as unknown"
+  ]
+}

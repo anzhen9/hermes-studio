@@ -668,8 +668,15 @@ function sniffMime(data: Buffer, filename: string): string {
   if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
   if (lower.endsWith('.gif')) return 'image/gif'
   if (lower.endsWith('.webp')) return 'image/webp'
-  // PNG magic bytes
-  if (data.length >= 8 && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) return 'image/png'
+  if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png'
+  return 'image/webp'
+}
+
+function mimeFromFilename(filename: string): string {
+  const extension = extname(filename).toLowerCase()
+  if (extension === '.png') return 'image/png'
+  if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg'
+  if (extension === '.gif') return 'image/gif'
   return 'image/webp'
 }
 
@@ -679,24 +686,20 @@ function sniffMime(data: Buffer, filename: string): string {
  * The imported pet is installed but not automatically set as the active pet.
  */
 export async function importLocalPet(profile: string, input: ImportLocalPetInput): Promise<LocalImportedPet> {
-  if (!input.spritesheet || input.spritesheet.length === 0) {
-    throw new Error('Pet spritesheet is required')
-  }
+  if (!input.spritesheet?.length) throw new Error('Pet spritesheet is required')
+
   const slug = safeSlug(input.slug)
   const mime = sniffMime(input.spritesheet, input.spritesheetFilename)
-
+  const extension = extname(input.spritesheetFilename).toLowerCase()
+  const spritesheetFile = ['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(extension)
+    ? `spritesheet${extension}`
+    : mime === 'image/png' ? 'spritesheet.png' : 'spritesheet.webp'
   const targetDir = petDir(profile, slug)
   await mkdir(targetDir, { recursive: true })
-
-  const spritesheetExt = extname(input.spritesheetFilename || '').toLowerCase()
-  const spritesheetFile = spritesheetExt && ['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(spritesheetExt)
-    ? `spritesheet${spritesheetExt}`
-    : mime === 'image/png' ? 'spritesheet.png' : 'spritesheet.webp'
-
   await writeFile(join(targetDir, spritesheetFile), input.spritesheet, { mode: 0o600 })
 
   let petJsonFile: string | undefined
-  if (input.petJson && input.petJson.trim()) {
+  if (input.petJson?.trim()) {
     petJsonFile = 'local-pet.json'
     await writeFile(join(targetDir, petJsonFile), input.petJson, { encoding: 'utf-8', mode: 0o600 })
   }
@@ -770,33 +773,32 @@ export async function importLocalPet(profile: string, input: ImportLocalPetInput
 }
 
 export async function listInstalledPets(profile: string): Promise<LocalImportedPet[]> {
-  const root = petsRoot(profile)
   let entries: string[]
   try {
-    entries = await readdir(root)
+    entries = await readdir(petsRoot(profile))
   } catch {
     return []
   }
 
-  const results: LocalImportedPet[] = []
+  const pets: LocalImportedPet[] = []
   for (const entry of entries) {
     if (entry === 'active.json') continue
-    const meta = await readJsonFile<InstalledPet>(petMetaPath(profile, entry))
-    if (!meta) continue
-    results.push({
-      slug: meta.slug,
-      displayName: meta.displayName,
-      kind: meta.kind,
-      submittedBy: meta.submittedBy,
-      source: meta.source,
-      spritesheetFile: meta.spritesheetFile || 'spritesheet.webp',
-      petJsonFile: meta.petJsonFile,
-      mime: meta.mime,
-      installedAt: meta.installedAt,
-      updatedAt: meta.updatedAt,
+    const installed = await readJsonFile<InstalledPet>(petMetaPath(profile, entry))
+    if (!installed) continue
+    pets.push({
+      slug: installed.slug,
+      displayName: installed.displayName,
+      kind: installed.kind,
+      submittedBy: installed.submittedBy,
+      source: installed.source,
+      spritesheetFile: installed.spritesheetFile || 'spritesheet.webp',
+      petJsonFile: installed.petJsonFile,
+      mime: installed.mime || mimeFromFilename(installed.spritesheetFile),
+      installedAt: installed.installedAt,
+      updatedAt: installed.updatedAt,
     })
   }
-  return results.sort((a, b) => b.installedAt - a.installedAt)
+  return pets.sort((left, right) => right.installedAt - left.installedAt)
 }
 
 export async function getLocalPetAsset(profile: string, slugInput: string): Promise<{ buffer: Buffer; mime: string } | null> {
@@ -897,12 +899,4 @@ export async function deleteInstalledPet(profile: string, slugInput: string): Pr
   }
 
   return { deleted: true, wasActive }
-}
-
-function mimeFromFilename(filename: string): string {
-  const ext = extname(filename || '').toLowerCase()
-  if (ext === '.png') return 'image/png'
-  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
-  if (ext === '.gif') return 'image/gif'
-  return 'image/webp'
 }
