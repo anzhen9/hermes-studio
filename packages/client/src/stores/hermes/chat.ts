@@ -1322,6 +1322,7 @@ export const useChatStore = defineStore('chat', () => {
   const isRunActive = computed(() => isStreaming.value)
   let loadSessionsRequestSequence = 0
   let switchSessionRequestSequence = 0
+  let activeSelectionSequence = 0
 
   function beginMessageLoad(sessionId: string, requestSequence: number) {
     const next = new Map(messageLoadRequests.value)
@@ -1464,6 +1465,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function clearActiveSession() {
+    activeSelectionSequence++
     const sid = activeSessionId.value
     activeSessionId.value = null
     activeSession.value = null
@@ -1574,11 +1576,16 @@ export const useChatStore = defineStore('chat', () => {
 
   async function loadSessions(profile?: string | null, preferredSessionId?: string | null) {
     const requestSequence = ++loadSessionsRequestSequence
+    const selectionSequence = activeSelectionSequence
     isLoadingSessions.value = true
     try {
       const list = await fetchRuntimeSessions(profile)
       if (requestSequence !== loadSessionsRequestSequence) return
-      let fresh = list.map(mapHermesSession)
+      const fresh = list.map(mapHermesSession)
+      const selectionChanged = selectionSequence !== activeSelectionSequence
+      const explicitlySelectedSession = selectionChanged && activeSessionId.value
+        ? sessions.value.find(session => session.id === activeSessionId.value) || activeSession.value
+        : null
       // Preserve already-loaded messages for sessions that are still present,
       // so we don't blow away the active session's messages on refresh.
       const runtimeByIdBefore = new Map(sessions.value.map(s => [s.id, {
@@ -1592,16 +1599,31 @@ export const useChatStore = defineStore('chat', () => {
         if (prev?.contextTokens != null) s.contextTokens = prev.contextTokens
         if (!s.apiMode && prev?.apiMode) s.apiMode = prev.apiMode
       }
-      // Preserve a locally-created session that the backend hasn't persisted
-      // yet. Without this, loadSessions would drop it from the list and the
-      // ChatView route guard would bounce away to hermes.chat because the
-      // route sessionId could no longer be found.
-      if (preferredSessionId && !fresh.some(s => s.id === preferredSessionId)) {
-        const local = sessions.value.find(s => s.id === preferredSessionId)
-        if (local) fresh = [local, ...fresh]
+      const freshIds = new Set(fresh.map(session => session.id))
+      const localOnlySessions = sessions.value.filter(session =>
+        session.isLocalOnly
+        && !freshIds.has(session.id)
+        && (!profile || session.profile === profile),
+      )
+      if (
+        explicitlySelectedSession
+        && !freshIds.has(explicitlySelectedSession.id)
+        && !localOnlySessions.some(session => session.id === explicitlySelectedSession.id)
+      ) {
+        localOnlySessions.unshift(explicitlySelectedSession)
       }
-      sessions.value = fresh
+      sessions.value = [...localOnlySessions, ...fresh]
       pruneCompletedUnreadSessions(new Set(sessions.value.map(s => s.id)))
+
+      // A session load may have started before the user selected or created a
+      // different chat. Keep the refreshed list, but do not let that stale
+      // continuation take ownership of the active selection.
+      if (selectionChanged) {
+        activeSession.value = activeSessionId.value
+          ? sessions.value.find(session => session.id === activeSessionId.value) || null
+          : null
+        return
+      }
 
       // Restore route-selected session first (tab-local source of truth),
       // then current in-memory session, then persisted legacy/default choice,
@@ -1817,6 +1839,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function switchSession(sessionId: string, focusId?: string | null) {
+    activeSelectionSequence++
     const requestSequence = ++switchSessionRequestSequence
     clearThinkingObservationFor(sessionId)
     activeSessionId.value = sessionId
