@@ -13,6 +13,7 @@ export interface SessionSummary {
   model: string
   provider?: string
   api_mode?: ProviderApiMode
+  reasoning_effort?: string
   title: string | null
   parent_session_id?: string | null
   fork_point_message_id?: string | null
@@ -24,6 +25,7 @@ export interface SessionSummary {
   ended_at: number | null
   last_active?: number
   is_archived?: number | boolean
+  push_enabled?: number | boolean
   message_count: number
   tool_call_count: number
   input_tokens: number
@@ -234,6 +236,16 @@ export async function readSessionWorkspaceFile(
   const params = new URLSearchParams({ path })
   return request<{ content: string; path: string; size: number }>(
     `/api/hermes/sessions/${encodeURIComponent(sessionId)}/workspace-file/read?${params}`,
+  )
+}
+
+export async function fetchSessionWorkspaceFileDiff(
+  sessionId: string,
+  path: string,
+): Promise<import('./files').WorkspaceFileDiff> {
+  const params = new URLSearchParams({ path })
+  return request(
+    `/api/hermes/sessions/${encodeURIComponent(sessionId)}/workspace-file/diff?${params}`,
   )
 }
 
@@ -650,4 +662,28 @@ export async function fetchContextLength(profile?: string, provider?: string, mo
   const query = params.toString()
   const res = await request<{ context_length: number }>(`/api/hermes/sessions/context-length${query ? `?${query}` : ''}`)
   return res.context_length
+}
+
+export async function setSessionPushEnabled(id: string, pushEnabled: boolean): Promise<boolean> {
+  try {
+    await request(`/api/hermes/sessions/${encodeURIComponent(id)}/push-enabled`, {
+      method: 'POST',
+      body: JSON.stringify({ pushEnabled }),
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function setSessionReasoningEffort(id: string, reasoningEffort: string): Promise<boolean> {
+  try {
+    await request(`/api/hermes/sessions/${encodeURIComponent(id)}/reasoning-effort`, {
+      method: 'POST',
+      body: JSON.stringify({ reasoningEffort }),
+    })
+    return true
+  } catch {
+    return false
+  }
 }

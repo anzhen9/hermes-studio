@@ -1,4 +1,6 @@
+import { socialMessagesEn } from '../social-messages'
 export default {
+  socialMessages: socialMessagesEn,
   browser: {
     title: 'Browser', settings: 'Browser Settings', desktopOnly: 'The embedded browser is available only in Hermes Studio Desktop.', newTab: 'New Tab',
     back: 'Back', forward: 'Forward', reload: 'Reload', stop: 'Stop', addressPlaceholder: 'Search or enter an address',
@@ -212,6 +214,7 @@ export default {
     journey: 'Journey',
     skillsUsage: 'Skills Usage',
     channels: 'Channels',
+    socialMessages: 'Send Messages',
     gateways: 'Gateways',
     terminal: 'Terminal',
     browser: 'Browser',
@@ -380,6 +383,7 @@ export default {
       scanToAdd: 'Scan to add',
       viewList: 'List',
       viewDownload: 'Download',
+      viewMessages: 'Message Push',
       downloadTitle: 'HStudio on your phone',
       downloadDescription: 'We are currently in closed beta. A registration code is required to sign up, and we will share a limited number of codes on our social media channels.',
       downloadScan: 'Scan with your phone',
