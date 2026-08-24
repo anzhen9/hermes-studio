@@ -1,4 +1,6 @@
+import { socialMessagesDe } from '../social-messages-locales'
 export default {
+  socialMessages: socialMessagesDe,
   browser: {
     title: 'Browser', settings: 'Browser-Einstellungen', desktopOnly: 'Der integrierte Browser ist nur in Hermes Studio Desktop verfügbar.', newTab: 'Neuer Tab',
     back: 'Zurück', forward: 'Vor', reload: 'Neu laden', stop: 'Stopp', addressPlaceholder: 'Suchen oder Adresse eingeben',
@@ -222,6 +224,7 @@ export default {
     journey: 'Lernverlauf',
     skillsUsage: 'Skill-Nutzung',
     channels: 'Kanale',
+    socialMessages: 'Nachrichten senden',
     terminal: 'Konsole',
     browser: 'Browser',
     singleChat: 'Chat',
@@ -392,6 +395,7 @@ export default {
       scanToAdd: 'Per Scan hinzufügen',
       viewList: 'Liste',
       viewDownload: 'Download',
+      viewMessages: 'Nachrichtenversand',
       downloadTitle: 'HStudio auf deinem Smartphone',
       downloadDescription: 'Wir befinden uns derzeit in einer geschlossenen Beta. Für die Registrierung ist ein Registrierungscode erforderlich; einige Codes werden wir über unsere Social-Media-Kanäle veröffentlichen.',
       downloadScan: 'Mit dem Smartphone scannen',

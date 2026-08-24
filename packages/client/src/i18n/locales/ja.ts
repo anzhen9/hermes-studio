@@ -1,4 +1,6 @@
+import { socialMessagesJa } from '../social-messages-locales'
 export default {
+  socialMessages: socialMessagesJa,
   browser: {
     title: 'ブラウザー', settings: 'ブラウザー設定', desktopOnly: '内蔵ブラウザーは Hermes Studio Desktop でのみ利用できます。', newTab: '新しいタブ',
     back: '戻る', forward: '進む', reload: '再読み込み', stop: '停止', addressPlaceholder: '検索またはアドレスを入力',
@@ -222,6 +224,7 @@ export default {
     journey: '学習履歴',
     skillsUsage: 'スキル使用状況',
     channels: 'チャンネル',
+    socialMessages: 'メッセージ送信',
     terminal: 'ターミナル',
     browser: 'ブラウザー',
     singleChat: 'チャット',
@@ -392,6 +395,7 @@ export default {
       scanToAdd: 'スキャンして追加',
       viewList: '一覧',
       viewDownload: 'ダウンロード',
+      viewMessages: 'メッセージ送信',
       downloadTitle: 'スマートフォンで HStudio を使う',
       downloadDescription: '現在クローズドベータ中です。登録には登録コードが必要で、今後ソーシャルメディアで一部のコードを配布します。',
       downloadScan: 'スマートフォンでスキャン',

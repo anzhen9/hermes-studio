@@ -501,6 +501,14 @@ export async function readGroupWorkspaceFile(roomId: string, path: string): Prom
     return request(`/api/hermes/group-chat/rooms/${encodeURIComponent(roomId)}/workspace-file/read?${params}`)
 }
 
+export async function fetchGroupWorkspaceFileDiff(
+    roomId: string,
+    path: string,
+): Promise<import('./files').WorkspaceFileDiff> {
+    const params = new URLSearchParams({ path })
+    return request(`/api/hermes/group-chat/rooms/${encodeURIComponent(roomId)}/workspace-file/diff?${params}`)
+}
+
 export async function fetchGroupWorkspaceFileBlob(roomId: string, path: string, signal?: AbortSignal): Promise<Blob> {
     const params = new URLSearchParams({ path })
     return fetchAuthenticatedBlob(

@@ -1,4 +1,6 @@
+import { socialMessagesRu } from '../social-messages-locales'
 export default {
+  socialMessages: socialMessagesRu,
   browser: {
     title: 'Браузер', settings: 'Настройки браузера', desktopOnly: 'Встроенный браузер доступен только в Hermes Studio Desktop.', newTab: 'Новая вкладка',
     back: 'Назад', forward: 'Вперёд', reload: 'Обновить', stop: 'Остановить', addressPlaceholder: 'Поиск или адрес',
@@ -137,6 +139,7 @@ export default {
     journey: 'Путь обучения',
     skillsUsage: 'Использование навыков',
     channels: 'Каналы',
+    socialMessages: 'Отправить сообщение',
     gateways: 'Шлюзы',
     terminal: 'Терминал',
     browser: 'Браузер',
@@ -307,6 +310,7 @@ export default {
       scanToAdd: 'Добавить сканированием',
       viewList: 'Список',
       viewDownload: 'Скачать',
+      viewMessages: 'Отправка сообщений',
       downloadTitle: 'HStudio на вашем телефоне',
       downloadDescription: 'Сейчас мы проводим закрытое бета-тестирование. Для регистрации нужен код, часть кодов мы будем публиковать в наших социальных сетях.',
       downloadScan: 'Сканировать телефоном',
