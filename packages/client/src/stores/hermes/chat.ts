@@ -471,6 +471,8 @@ export interface Session {
    * Empty string / undefined = use config.yaml default.
    * Values: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' */
   reasoningEffort?: string
+  /** System instructions for the session (used by expert agents). */
+  instructions?: string
 }
 
 interface CompressionState {
@@ -1861,6 +1863,7 @@ export const useChatStore = defineStore('chat', () => {
     baseUrl?: string
     apiKey?: string
     apiMode?: ProviderApiMode
+    instructions?: string
   } = {}): Session {
     const source = runtimeMode.value === 'global_agent' ? 'global_agent' : options.source || 'cli'
     const codingAgentId = options.codingAgentId || agentToCodingAgentId(options.agent)
@@ -1884,6 +1887,7 @@ export const useChatStore = defineStore('chat', () => {
       baseUrl: options.baseUrl,
       apiKey: options.apiKey,
       apiMode: options.apiMode,
+      instructions: options.instructions,
     }
     sessions.value.unshift(session)
     return session
@@ -3527,10 +3531,11 @@ export const useChatStore = defineStore('chat', () => {
           )
         : undefined
       const runPayload: StartRunRequest = {
-        input,
-        ...(displayInput ? { display_input: displayInput } : {}),
-        session_id: sid,
-        profile: sessionProfile,
+       input,
+       ...(displayInput ? { display_input: displayInput } : {}),
+       instructions: activeSession.value?.instructions,
+       session_id: sid,
+       profile: sessionProfile,
         model: isCodingAgentExecution
           ? (codingAgentMode === 'global' ? undefined : sessionModel || undefined)
           : shouldSendInitialSessionConfig ? sessionModel || undefined : undefined,
