@@ -1,6 +1,6 @@
 {
   "name": "hermes-web-ui",
-  "version": "0.6.45",
+  "version": "0.6.47",
   "description": "Self-hosted AI chat dashboard for Hermes Agent — multi-model web UI with multi-platform integration",
   "repository": {
     "type": "git",
@@ -52,9 +52,7 @@
     "test:e2e:ui": "playwright test --ui",
     "mcu:v1:flash:clean": "pio run -d packages/esp32-c3/v1 && pio run -d packages/esp32-c3/v1 -t erase && pio run -d packages/esp32-c3/v1 -t upload",
     "mcu:v2:flash:clean": "pio run -d packages/esp32-c3/v2 && pio run -d packages/esp32-c3/v2 -t erase && pio run -d packages/esp32-c3/v2 -t upload",
-    "mcu:v1:flash:clean:sparkbot": "pio run -d packages/esp-sparkbot/v1 && pio run -d packages/esp-sparkbot/v1 -t erase && pio run -d packages/esp-sparkbot/v1 -t upload",
     "mcu:flash:clean": "npm run mcu:v1:flash:clean",
-    "mcu:flash:clean:sparkbot": "npm run mcu:v1:flash:clean:sparkbot",
     "desktop:install": "npm ci --prefix packages/desktop --no-audit --no-fund",
     "desktop:prepare-runtime": "npm --prefix packages/desktop run prepare:runtime",
     "desktop:prepare-python": "npm --prefix packages/desktop run prepare:python",
