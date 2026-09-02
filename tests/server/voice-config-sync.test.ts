@@ -21,23 +21,24 @@ beforeEach(async () => {
   await mkdir(hermesHome, { recursive: true })
   await writeFile(join(hermesHome, 'config.yaml'), 'model:\n  default: keep/model\n', 'utf-8')
   await writeFile(join(hermesHome, '.env'), 'KEEP_SECRET=keep\n', 'utf-8')
+  await import('../../packages/server/src/bootstrap/agent-profile-adapter')
 
   const { DatabaseSync } = await import('node:sqlite')
   db = new DatabaseSync(':memory:')
-  vi.doMock('../../packages/server/src/db/index', () => ({
+  vi.doMock('../../packages/server/src/modules/studio/infrastructure/database/index', () => ({
     getDb: () => db,
     getStoragePath: () => ':memory:',
   }))
 
-  const schemas = await import('../../packages/server/src/db/hermes/schemas')
+  const schemas = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
   schemas.initAllHermesTables()
 })
 
 afterEach(async () => {
   db?.close()
   db = null
-  vi.doUnmock('../../packages/server/src/db/index')
-  vi.doUnmock('../../packages/server/src/services/hermes/local-stt-model-manager')
+  vi.doUnmock('../../packages/server/src/modules/studio/infrastructure/database/index')
+  vi.doUnmock('../../packages/server/src/modules/studio/services/voice/stt/local-model-manager')
   vi.resetModules()
   if (originalHermesHome === undefined) delete process.env.HERMES_HOME
   else process.env.HERMES_HOME = originalHermesHome
@@ -54,8 +55,8 @@ async function readConfig(): Promise<Record<string, any>> {
 
 describe('Hermes voice config sync', () => {
   it('registers one Hermes Studio provider while keeping upstream settings and secrets in Web UI storage', async () => {
-    const sttStore = await import('../../packages/server/src/db/hermes/stt-settings-store')
-    const ttsStore = await import('../../packages/server/src/db/hermes/tts-settings-store')
+    const sttStore = await import('../../packages/server/src/modules/studio/repositories/stt-settings-store')
+    const ttsStore = await import('../../packages/server/src/modules/studio/repositories/tts-settings-store')
     sttStore.saveSttProviderSetting('default', 'openai', {
       settings: {
         baseUrl: 'https://api.openai.com/v1/audio/transcriptions',
@@ -80,7 +81,7 @@ describe('Hermes voice config sync', () => {
     ttsStore.saveActiveTtsProvider('default', 'custom')
     expect(ttsStore.getTtsProviderSetting('default', 'custom')?.settings.cloneVoices).toBe('[{"id":"S_one","name":"My voice"},{"id":"S_two","name":"客服女声"}]')
 
-    const { syncVoiceConfigToHermesProfile } = await import('../../packages/server/src/services/hermes/voice-config-sync')
+    const { syncVoiceConfigToHermesProfile } = await import('../../packages/server/src/modules/studio/services/voice/config-sync')
     await expect(syncVoiceConfigToHermesProfile('default')).resolves.toEqual({
       stt: 'hermes-studio',
       tts: 'hermes-studio',
@@ -100,10 +101,10 @@ describe('Hermes voice config sync', () => {
       voice_compatible: true,
     })
     expect(config.stt.providers['hermes-studio'].command).toContain(
-      '/api/hermes/voice/proxy/default/v1/audio/transcriptions',
+      '/api/studio/voice/proxy/default/v1/audio/transcriptions',
     )
     expect(config.tts.providers['hermes-studio'].command).toContain(
-      '/api/hermes/voice/proxy/default/v1/tts',
+      '/api/studio/voice/proxy/default/v1/tts',
     )
     expect(JSON.stringify(config)).not.toContain('stt-secret')
     expect(JSON.stringify(config)).not.toContain('tts-secret')
@@ -128,15 +129,15 @@ describe('Hermes voice config sync', () => {
       '',
     ].join('\n'), 'utf-8')
 
-    const sttStore = await import('../../packages/server/src/db/hermes/stt-settings-store')
-    const ttsStore = await import('../../packages/server/src/db/hermes/tts-settings-store')
+    const sttStore = await import('../../packages/server/src/modules/studio/repositories/stt-settings-store')
+    const ttsStore = await import('../../packages/server/src/modules/studio/repositories/tts-settings-store')
     sttStore.saveActiveSttProvider('default', 'browser')
     ttsStore.saveTtsProviderSetting('default', 'edge', {
       settings: { voice: 'zh-CN-XiaoxiaoNeural', rate: 1.1 },
     })
     ttsStore.saveActiveTtsProvider('default', 'edge')
 
-    const { syncVoiceConfigToHermesProfile } = await import('../../packages/server/src/services/hermes/voice-config-sync')
+    const { syncVoiceConfigToHermesProfile } = await import('../../packages/server/src/modules/studio/services/voice/config-sync')
     await syncVoiceConfigToHermesProfile('default')
 
     const config = await readConfig()
@@ -150,17 +151,17 @@ describe('Hermes voice config sync', () => {
   })
 
   it('routes an available Studio local model through the non-streaming voice proxy', async () => {
-    vi.doMock('../../packages/server/src/services/hermes/local-stt-model-manager', () => ({
+    vi.doMock('../../packages/server/src/modules/studio/services/voice/stt/local-model-manager', () => ({
       isLocalSttModelUsable: () => true,
     }))
-    const sttStore = await import('../../packages/server/src/db/hermes/stt-settings-store')
+    const sttStore = await import('../../packages/server/src/modules/studio/repositories/stt-settings-store')
     sttStore.saveSttProviderSetting('default', 'local', {
       settings: { model: 'local-model' },
       secrets: {},
     })
     sttStore.saveActiveSttProvider('default', 'local')
 
-    const { syncVoiceConfigToHermesProfile } = await import('../../packages/server/src/services/hermes/voice-config-sync')
+    const { syncVoiceConfigToHermesProfile } = await import('../../packages/server/src/modules/studio/services/voice/config-sync')
     await expect(syncVoiceConfigToHermesProfile('default')).resolves.toMatchObject({ stt: 'hermes-studio' })
 
     const config = await readConfig()
@@ -172,8 +173,8 @@ describe('Hermes voice config sync', () => {
   })
 
   it('hides Groq and MiMo behind the same Hermes Studio provider', async () => {
-    const sttStore = await import('../../packages/server/src/db/hermes/stt-settings-store')
-    const ttsStore = await import('../../packages/server/src/db/hermes/tts-settings-store')
+    const sttStore = await import('../../packages/server/src/modules/studio/repositories/stt-settings-store')
+    const ttsStore = await import('../../packages/server/src/modules/studio/repositories/tts-settings-store')
     sttStore.saveSttProviderSetting('default', 'custom', {
       settings: {
         baseUrl: 'https://api.groq.com/openai/v1/audio/transcriptions',
@@ -188,7 +189,7 @@ describe('Hermes voice config sync', () => {
     })
     ttsStore.saveActiveTtsProvider('default', 'mimo')
 
-    const { syncVoiceConfigToHermesProfile } = await import('../../packages/server/src/services/hermes/voice-config-sync')
+    const { syncVoiceConfigToHermesProfile } = await import('../../packages/server/src/modules/studio/services/voice/config-sync')
     await expect(syncVoiceConfigToHermesProfile('default')).resolves.toEqual({
       stt: 'hermes-studio',
       tts: 'hermes-studio',
@@ -203,7 +204,7 @@ describe('Hermes voice config sync', () => {
   })
 
   it('uses a WAV command output for Gemini PCM audio', async () => {
-    const ttsStore = await import('../../packages/server/src/db/hermes/tts-settings-store')
+    const ttsStore = await import('../../packages/server/src/modules/studio/repositories/tts-settings-store')
     ttsStore.saveTtsProviderSetting('default', 'gemini', {
       settings: {
         model: 'gemini-2.5-flash-preview-tts',
@@ -213,7 +214,7 @@ describe('Hermes voice config sync', () => {
     })
     ttsStore.saveActiveTtsProvider('default', 'gemini')
 
-    const { syncVoiceConfigToHermesProfile } = await import('../../packages/server/src/services/hermes/voice-config-sync')
+    const { syncVoiceConfigToHermesProfile } = await import('../../packages/server/src/modules/studio/services/voice/config-sync')
     await syncVoiceConfigToHermesProfile('default')
 
     const config = await readConfig()

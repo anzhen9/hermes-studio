@@ -13,8 +13,8 @@ import {
   scanLanDevices,
   selectLanIPv4Address,
   startLanDiscoveryResponder,
-} from '../../packages/server/src/services/lan-discovery'
-import type { PublicSystemInfo } from '../../packages/server/src/services/system-info'
+} from '../../packages/server/src/modules/studio/services/network/lan-discovery'
+import type { PublicSystemInfo } from '../../packages/server/src/modules/studio/public/system-info'
 
 const fakeKeyPair = generateKeyPairSync('ed25519', {
   publicKeyEncoding: { type: 'spki', format: 'pem' },
@@ -232,24 +232,20 @@ describe('LAN discovery', () => {
   })
 
   it('registers device request routes before auth and device management routes behind super admin auth', () => {
-    const source = readFileSync('packages/server/src/routes/index.ts', 'utf8')
-    const deviceRoutesSource = readFileSync('packages/server/src/routes/devices.ts', 'utf8')
-    const petdexRoutesSource = readFileSync('packages/server/src/routes/hermes/petdex.ts', 'utf8')
-    const mcuDeviceRoutesSource = readFileSync('packages/server/src/routes/mcu-devices.ts', 'utf8')
-    const bootstrapSource = readFileSync('packages/server/src/index.ts', 'utf8')
+    const source = readFileSync('packages/server/src/bootstrap/routes.ts', 'utf8')
+    const deviceRoutesSource = readFileSync('packages/server/src/modules/studio/routes/devices.ts', 'utf8')
+    const mcuDeviceRoutesSource = readFileSync('packages/server/src/modules/studio/routes/mcu-devices.ts', 'utf8')
+    const bootstrapSource = readFileSync('packages/server/src/bootstrap/http.ts', 'utf8')
 
     const authIndex = source.indexOf('authMiddleware.forEach')
     const publicDeviceIndex = source.indexOf('app.use(devicePublicRoutes.routes())')
-    const petdexPublicIndex = source.indexOf('app.use(petdexPublicRoutes.routes())')
     const deviceIndex = source.indexOf('app.use(deviceRoutes.routes())')
 
     expect(authIndex).toBeGreaterThanOrEqual(0)
     expect(publicDeviceIndex).toBeGreaterThanOrEqual(0)
-    expect(petdexPublicIndex).toBeGreaterThanOrEqual(0)
     expect(deviceIndex).toBeGreaterThanOrEqual(0)
     expect(deviceRoutesSource).toContain("devicePublicRoutes.post('/api/devices/link-status'")
     expect(deviceRoutesSource).toContain("devicePublicRoutes.get('/api/devices/link-info'")
-    expect(petdexRoutesSource).toContain("petdexPublicRoutes.get('/api/hermes/petdex/asset'")
     expect(deviceRoutesSource).toContain("import { requireSuperAdmin }")
     expect(deviceRoutesSource).toContain('deviceRoutes.use(requireSuperAdmin)')
     expect(deviceRoutesSource).toContain("deviceRoutes.get('/api/devices/pairing-link'")
@@ -261,12 +257,11 @@ describe('LAN discovery', () => {
     expect(mcuDeviceRoutesSource).not.toContain('requireSuperAdmin')
     expect(bootstrapSource).toContain('getLanPeerSocketPath()')
     expect(publicDeviceIndex).toBeLessThan(authIndex)
-    expect(petdexPublicIndex).toBeLessThan(authIndex)
     expect(deviceIndex).toBeGreaterThan(authIndex)
   })
 
   it('keeps LAN peer terminals bounded and idle-reclaimable', () => {
-    const peerSocketSource = readFileSync('packages/server/src/services/lan-peer-socket.ts', 'utf8')
+    const peerSocketSource = readFileSync('packages/server/src/modules/studio/services/network/lan-peer-socket.ts', 'utf8')
 
     expect(peerSocketSource).toContain("boundedEnvInt('HERMES_LAN_PEER_MAX_TERMINALS', 4")
     expect(peerSocketSource).toContain("boundedEnvInt('HERMES_LAN_PEER_TERMINAL_IDLE_MS', 10 * 60 * 1000")

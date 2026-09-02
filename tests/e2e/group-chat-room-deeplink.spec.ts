@@ -105,6 +105,40 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
   const inviteCodeUpdates: Array<{ roomId: string, body: unknown }> = []
   const guestAgentPolicyUpdates: Array<{ roomId: string, body: any }> = []
   const roomConfigUpdates: Array<{ roomId: string, body: any }> = []
+  const addedAgents: Array<{ roomId: string, body: any }> = []
+  const createdRooms: any[] = []
+  const presetOperations: Array<{ method: string, id?: string, body?: any }> = []
+  let agentPresets = [{
+    id: 'preset-reviewer',
+    agent: 'codex',
+    profile: 'default',
+    provider: 'test-provider',
+    model: 'test-model',
+    apiMode: 'codex_responses',
+    reasoningEffort: 'high',
+    name: 'Preset Reviewer',
+    description: 'Reviews changes',
+    avatar: '',
+    available: true,
+    validationError: '',
+    createdAt: 1,
+    updatedAt: 1,
+  }, {
+    id: 'preset-unavailable',
+    agent: 'codex',
+    profile: 'missing-profile',
+    provider: 'missing-provider',
+    model: 'missing-model',
+    apiMode: 'codex_responses',
+    reasoningEffort: '',
+    name: 'Unavailable Reviewer',
+    description: 'Unavailable configuration',
+    avatar: '',
+    available: false,
+    validationError: 'Profile "missing-profile" is unavailable',
+    createdAt: 1,
+    updatedAt: 1,
+  }]
   const handoffChains = [{
     chainId: 'handoff:alpha-msg',
     roomId: 'room-alpha',
@@ -134,6 +168,21 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
 
     if (pathname === '/health') return json({ status: 'ok' })
     if (pathname === '/api/auth/status') return json({ hasPasswordLogin: false, username: null })
+    if (pathname === '/api/hermes/runtime-versions/jobs' && request.method() === 'GET') return json({ jobs: [] })
+    if (pathname === '/api/agents/status' && request.method() === 'GET') {
+      return json({
+        revision: 1,
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        agents: [
+          { id: 'hermes', name: 'Hermes', provider: 'Nous Research', kind: 'hermes', installed: true, version: '0.19.1', source: 'user-cli', path: '/usr/local/bin/hermes', error: '', installations: [] },
+          { id: 'ekko-agent', name: 'Ekko', provider: 'Hermes Studio', kind: 'built-in', installed: true, version: '0.7.0', source: 'built-in', path: '', error: '', installations: [] },
+          { id: 'claude-code', name: 'Claude', provider: 'Anthropic', kind: 'coding-agent', installed: true, version: '1.0.0', source: 'user-cli', path: '/usr/local/bin/claude', error: '', installations: [] },
+          { id: 'codex', name: 'Codex', provider: 'OpenAI', kind: 'coding-agent', installed: true, version: '1.0.0', source: 'user-cli', path: '/usr/local/bin/codex', error: '', installations: [] },
+          { id: 'pi', name: 'Pi', provider: 'Pi', kind: 'coding-agent', installed: true, version: '1.0.0', source: 'user-cli', path: '/usr/local/bin/pi', error: '', installations: [] },
+          { id: 'grok', name: 'Grok', provider: 'xAI', kind: 'coding-agent', installed: true, version: '1.0.0', source: 'user-cli', path: '/usr/local/bin/grok', error: '', installations: [] },
+        ],
+      })
+    }
     if (pathname === '/api/hermes/profiles') return json({ profiles: [{ name: 'default', active: true, model: 'test-model', gateway: 'test' }] })
     if (pathname === '/api/hermes/available-models') {
       return json({
@@ -141,11 +190,47 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
         default_provider: 'test-provider',
         groups: [TEST_MODEL_GROUP],
         allProviders: [TEST_MODEL_GROUP],
+        profiles: [{
+          profile: 'default',
+          default: 'test-model',
+          default_provider: 'test-provider',
+          groups: [TEST_MODEL_GROUP],
+        }],
         model_aliases: {},
         model_visibility: {},
       })
     }
-    if (pathname === '/api/hermes/group-chat/rooms') {
+    if (pathname === '/api/studio/group-chat/agent-presets' && request.method() === 'GET') {
+      return json({ presets: agentPresets })
+    }
+    if (pathname === '/api/studio/group-chat/agent-presets' && request.method() === 'POST') {
+      const body = JSON.parse(request.postData() || '{}')
+      presetOperations.push({ method: 'POST', body })
+      const preset = { ...body, id: `preset-${agentPresets.length + 1}`, available: true, validationError: '', createdAt: 2, updatedAt: 2 }
+      agentPresets = [preset, ...agentPresets]
+      return json({ preset }, 201)
+    }
+    const presetMatch = pathname.match(/^\/api\/studio\/group-chat\/agent-presets\/([^/]+)$/)
+    if (presetMatch && request.method() === 'PUT') {
+      const body = JSON.parse(request.postData() || '{}')
+      presetOperations.push({ method: 'PUT', id: presetMatch[1], body })
+      const index = agentPresets.findIndex(item => item.id === presetMatch[1])
+      const preset = { ...agentPresets[index], ...body, updatedAt: 3 }
+      agentPresets[index] = preset
+      return json({ preset })
+    }
+    if (presetMatch && request.method() === 'DELETE') {
+      presetOperations.push({ method: 'DELETE', id: presetMatch[1] })
+      agentPresets = agentPresets.filter(item => item.id !== presetMatch[1])
+      return json({ success: true })
+    }
+    if (pathname === '/api/studio/group-chat/rooms' && request.method() === 'POST') {
+      const body = JSON.parse(request.postData() || '{}')
+      createdRooms.push(body)
+      const room = { ...baseRooms[0], id: 'room-created', name: body.name, inviteCode: body.inviteCode }
+      return json({ room, agents: [], agentResults: [] })
+    }
+    if (pathname === '/api/studio/group-chat/rooms') {
       return json({
         rooms: rooms.map(room => ({
           ...room,
@@ -161,7 +246,15 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
       })
     }
 
-    const handoffContinueMatch = pathname.match(/^\/api\/hermes\/group-chat\/rooms\/([^/]+)\/handoffs\/([^/]+)\/continue$/)
+    const addAgentMatch = pathname.match(/^\/api\/studio\/group-chat\/rooms\/([^/]+)\/agents$/)
+    if (addAgentMatch && request.method() === 'POST') {
+      const roomId = decodeURIComponent(addAgentMatch[1])
+      const body = JSON.parse(request.postData() || '{}')
+      addedAgents.push({ roomId, body })
+      return json({ agent: { ...body, id: 'agent-from-preset', roomId, agentId: 'runtime-from-preset', invited: 0 } })
+    }
+
+    const handoffContinueMatch = pathname.match(/^\/api\/studio\/group-chat\/rooms\/([^/]+)\/handoffs\/([^/]+)\/continue$/)
     if (handoffContinueMatch && request.method() === 'POST') {
       const chain = handoffChains.find(item => item.roomId === decodeURIComponent(handoffContinueMatch[1])
         && item.chainId === decodeURIComponent(handoffContinueMatch[2]))
@@ -174,7 +267,7 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
       return json({ success: true, attemptId: chain.attemptId, status: 'continuing', chain }, 202)
     }
 
-    const handoffListMatch = pathname.match(/^\/api\/hermes\/group-chat\/rooms\/([^/]+)\/handoffs$/)
+    const handoffListMatch = pathname.match(/^\/api\/studio\/group-chat\/rooms\/([^/]+)\/handoffs$/)
     if (handoffListMatch && request.method() === 'GET') {
       const roomId = decodeURIComponent(handoffListMatch[1])
       const room = rooms.find(item => item.id === roomId)
@@ -188,7 +281,7 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
       })
     }
 
-    const configMatch = pathname.match(/^\/api\/hermes\/group-chat\/rooms\/([^/]+)\/config$/)
+    const configMatch = pathname.match(/^\/api\/studio\/group-chat\/rooms\/([^/]+)\/config$/)
     if (configMatch && request.method() === 'PUT') {
       const roomId = decodeURIComponent(configMatch[1])
       const body = JSON.parse(request.postData() || '{}')
@@ -203,7 +296,7 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
       return json({ room })
     }
 
-    const inviteCodeMatch = pathname.match(/^\/api\/hermes\/group-chat\/rooms\/([^/]+)\/invite-code$/)
+    const inviteCodeMatch = pathname.match(/^\/api\/studio\/group-chat\/rooms\/([^/]+)\/invite-code$/)
     if (inviteCodeMatch && request.method() === 'PUT') {
       const roomId = decodeURIComponent(inviteCodeMatch[1])
       const body = JSON.parse(request.postData() || '{}')
@@ -215,7 +308,7 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
       return json({ success: true })
     }
 
-    const guestAgentPolicyMatch = pathname.match(/^\/api\/hermes\/group-chat\/rooms\/([^/]+)\/guest-agent-policy$/)
+    const guestAgentPolicyMatch = pathname.match(/^\/api\/studio\/group-chat\/rooms\/([^/]+)\/guest-agent-policy$/)
     if (guestAgentPolicyMatch && request.method() === 'PUT') {
       const roomId = decodeURIComponent(guestAgentPolicyMatch[1])
       const body = JSON.parse(request.postData() || '{}')
@@ -232,7 +325,7 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
       return json({ policy })
     }
 
-    const workspaceListMatch = pathname.match(/^\/api\/hermes\/group-chat\/rooms\/([^/]+)\/workspace-files\/list$/)
+    const workspaceListMatch = pathname.match(/^\/api\/studio\/group-chat\/rooms\/([^/]+)\/workspace-files\/list$/)
     if (workspaceListMatch) {
       return json({
         entries: [{ name: 'package.json', path: 'package.json', absolutePath: '/tmp/alpha/package.json', isDir: false, size: 25, modTime: '2026-07-17T00:00:00.000Z' }],
@@ -241,7 +334,7 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
       })
     }
 
-    const contentMatch = pathname.match(/^\/api\/hermes\/group-chat\/rooms\/([^/]+)\/workspace-file\/content$/)
+    const contentMatch = pathname.match(/^\/api\/studio\/group-chat\/rooms\/([^/]+)\/workspace-file\/content$/)
     if (contentMatch) {
       return route.fulfill({
         status: 200,
@@ -250,7 +343,7 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
       })
     }
 
-    const detailMatch = pathname.match(/^\/api\/hermes\/group-chat\/rooms\/([^/]+)$/)
+    const detailMatch = pathname.match(/^\/api\/studio\/group-chat\/rooms\/([^/]+)$/)
     if (detailMatch) {
       const roomId = decodeURIComponent(detailMatch[1])
       const room = rooms.find(r => r.id === roomId)
@@ -305,6 +398,9 @@ async function mockGroupChatApi(page: Page, offlinePresence = false) {
     guestAgentPolicyUpdates,
     roomConfigUpdates,
     roomDetailRequests,
+    addedAgents,
+    createdRooms,
+    presetOperations,
     failRoomDetail(roomId: string, offset: number, times = 1) {
       roomDetailFailures.set(`${roomId}:${offset}`, times)
     },
@@ -567,7 +663,7 @@ test.describe('group chat room deep links', () => {
     expect(toolNames.at(-1)).toBe('live_tool_1')
   })
 
-  test('keeps persistent room Agent grids stable while exact runs activate only matching cells', async ({ page }) => {
+  test('keeps persistent room Agent grids stable while active runs glow the complete room avatar', async ({ page }) => {
     await setup(page, '/#/hermes/group-chat/room/room-alpha')
 
     const activity = (overrides: Record<string, unknown> = {}) => ({
@@ -592,18 +688,68 @@ test.describe('group chat room deep links', () => {
     await expect(alphaGrid).toHaveAttribute('data-agent-count', '1')
     await expect(betaGrid).toHaveAttribute('data-agent-count', '1')
     await expect(emptyGrid).toHaveAttribute('data-agent-count', '0')
+    await expect(alphaGrid).not.toHaveClass(/is-active/)
     await expect(alphaGrid.locator('.room-agent-grid-cell.is-active')).toHaveCount(0)
     await expect(emptyGrid.locator('.room-agent-grid-neutral')).toHaveCount(1)
     await expect(alphaGrid).toHaveCSS('width', '36px')
     await expect(betaGrid).toHaveCSS('width', '36px')
     await expect(emptyGrid).toHaveCSS('width', '36px')
+    const evidenceDir = process.env.HERMES_VISUAL_EVIDENCE_DIR
+    if (evidenceDir) await alphaRoom.screenshot({ path: `${evidenceDir}/idle-room.png` })
 
     await triggerGroupSocket(page, 'room_agent_activity', activity())
     await triggerGroupSocket(page, 'room_agent_activity', activity({ runId: 'run-live-tools-2' }))
-    await expect(alphaGrid.locator('[data-agent-id="agent-row-1"]')).toHaveClass(/is-active/)
-    await expect(alphaGrid.locator('.room-agent-grid-cell.is-active')).toHaveCount(1)
-    await expect(page.locator('.group-agent-run[data-run-id="run-live-tools"] .run-avatar')).toHaveClass(/run-avatar-active/)
+    const activeAlphaAgent = alphaGrid.locator('[data-agent-id="agent-row-1"]')
+    const activeRunAvatar = page.locator('.group-agent-run[data-run-id="run-live-tools"] .run-avatar')
+    await expect(alphaGrid).toHaveClass(/is-active/)
+    await expect(alphaGrid).toHaveAttribute('aria-busy', 'true')
+    await expect(activeAlphaAgent).not.toHaveClass(/is-active/)
+    await expect(alphaGrid.locator('.room-agent-grid-cell.is-active')).toHaveCount(0)
+    await expect(activeRunAvatar).toHaveClass(/run-avatar-active/)
     await expect(page.locator('.group-agent-run[data-run-id="run-history-tools"] .run-avatar')).not.toHaveClass(/run-avatar-active/)
+    if (evidenceDir) {
+      await alphaRoom.screenshot({ path: `${evidenceDir}/active-room-rainbow.png` })
+      await activeRunAvatar.scrollIntoViewIfNeeded()
+      await page.screenshot({ path: `${evidenceDir}/active-message-rainbow.png` })
+    }
+    await expect.poll(() => alphaGrid.evaluate((element) => {
+      const glow = getComputedStyle(element, '::after')
+      return {
+        inset: glow.top,
+        animation: glow.animationName,
+        radius: glow.borderRadius,
+        shadow: glow.boxShadow,
+      }
+    })).toMatchObject({
+      inset: '-4px',
+      animation: expect.stringContaining('room-avatar-rainbow-glow'),
+      radius: '12px',
+      shadow: expect.not.stringMatching(/^none$/),
+    })
+    await expect.poll(() => activeRunAvatar.evaluate((element) => {
+      const avatar = getComputedStyle(element)
+      const glow = getComputedStyle(element, '::before')
+      return {
+        avatarRadius: avatar.borderRadius,
+        glowInset: glow.top,
+        glowRadius: glow.borderRadius,
+        glowAnimation: glow.animationName,
+        glowShadow: glow.boxShadow,
+      }
+    })).toMatchObject({
+      avatarRadius: '50%',
+      glowInset: '-4px',
+      glowRadius: '50%',
+      glowAnimation: expect.stringContaining('run-avatar-rainbow-glow'),
+      glowShadow: expect.not.stringMatching(/^none$/),
+    })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await expect.poll(() => Promise.all([
+      alphaGrid.evaluate(element => getComputedStyle(element, '::after').animationName),
+      activeRunAvatar.evaluate(element => getComputedStyle(element, '::before').animationName),
+      activeRunAvatar.evaluate(element => getComputedStyle(element, '::before').boxShadow),
+    ])).toEqual(['none', 'none', expect.stringContaining('rgb(255, 107, 107)')])
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
 
     await triggerGroupSocket(page, 'room_agent_activity', activity({
       roomId: 'room-beta',
@@ -614,14 +760,15 @@ test.describe('group chat room deep links', () => {
 
     await expect(alphaRoom.locator(':scope > .room-icon')).toHaveCount(0)
     await expect(alphaRoom.locator(':scope > .room-agent-grid + .room-info')).toHaveCount(1)
-    await expect(betaGrid.locator('[data-agent-id="agent-row-runtime"]')).toHaveClass(/is-active/)
+    await expect(betaGrid).toHaveClass(/is-active/)
+    await expect(betaGrid.locator('[data-agent-id="agent-row-runtime"]')).not.toHaveClass(/is-active/)
     await expect.poll(() => alphaRoom.locator('.room-info').evaluate(element => element.getBoundingClientRect().x)).toBe(alphaInfoX)
     await expect.poll(() => betaRoom.locator('.room-info').evaluate(element => element.getBoundingClientRect().x)).toBe(betaInfoX)
 
     await triggerGroupSocket(page, 'room_agent_activity', activity({ status: 'ready' }))
-    await expect(alphaGrid.locator('[data-agent-id="agent-row-1"]')).toHaveClass(/is-active/)
+    await expect(alphaGrid).toHaveClass(/is-active/)
     await triggerGroupSocket(page, 'room_agent_activity', activity({ runId: 'run-live-tools-2', status: 'ready' }))
-    await expect(alphaGrid.locator('.room-agent-grid-cell.is-active')).toHaveCount(0)
+    await expect(alphaGrid).not.toHaveClass(/is-active/)
 
     await triggerGroupSocket(page, 'agents_updated', {
       roomId: 'room-alpha',
@@ -651,7 +798,38 @@ test.describe('group chat room deep links', () => {
     await betaRoom.click()
     await expect(page).toHaveURL(/#\/hermes\/group-chat\/room\/room-beta$/)
     await expect(alphaGrid).toHaveAttribute('data-agent-count', '2')
-    await expect(betaGrid.locator('[data-agent-id="agent-row-runtime"]')).toHaveClass(/is-active/)
+    await expect(betaGrid).toHaveClass(/is-active/)
+    await expect(betaGrid.locator('[data-agent-id="agent-row-runtime"]')).not.toHaveClass(/is-active/)
+  })
+
+  test('removes an interrupted run approval from the room approval surface', async ({ page }) => {
+    await setup(page, '/#/hermes/group-chat/room/room-alpha')
+
+    await triggerGroupSocket(page, 'approval.requested', {
+      event: 'approval.requested',
+      roomId: 'room-alpha',
+      agentName: 'Worker',
+      approval_id: 'approval-interrupted',
+      command: 'printf harmless',
+      description: 'Harmless command awaiting approval',
+      choices: ['once', 'deny'],
+    })
+    await expect(page.locator('.approval-float-panel')).toContainText('printf harmless')
+
+    await triggerGroupSocket(page, 'approval.resolved', {
+      event: 'approval.resolved',
+      roomId: 'room-alpha',
+      agentName: 'Worker',
+      approval_id: 'approval-interrupted',
+      choice: 'deny',
+      reason: 'Agent run interrupted',
+    })
+    await expect(page.locator('.approval-float-panel')).toHaveCount(0)
+    if (process.env.HERMES_VISUAL_EVIDENCE_DIR) {
+      await page.screenshot({
+        path: `${process.env.HERMES_VISUAL_EVIDENCE_DIR}/approval-removed-after-interrupt.png`,
+      })
+    }
   })
 
   test('loads all group history by stable cursor beyond 600 messages with retry, de-duplication, and anchor preservation', async ({ page }) => {
@@ -991,6 +1169,113 @@ test.describe('group chat room deep links', () => {
     })
   }
 
+  test('applies an Agent preset when adding an Agent to an existing room', async ({ page }) => {
+    const api = await setup(page, '/#/hermes/group-chat/room/room-alpha')
+
+    await page.locator('.agent-avatar-rail-add').click()
+    const modal = page.locator('.modal').filter({ hasText: 'Add Agent' })
+    const nameInput = modal.getByPlaceholder('Custom name (leave empty to use profile name)')
+    await nameInput.fill('Draft Agent')
+    await modal.getByRole('button', { name: 'Choose preset' }).click()
+    const presetDialog = page.locator('.agent-preset-dialog').filter({ hasText: 'Choose preset' })
+    await expect(presetDialog).toBeVisible()
+    await expect(presetDialog.getByText('Profile "missing-profile" is unavailable', { exact: true })).toBeVisible()
+    await expect(presetDialog.getByRole('button', { name: /Unavailable Reviewer/ })).toBeDisabled()
+    await presetDialog.getByPlaceholder('Search presets').fill('Reviewer')
+    await presetDialog.getByRole('button', { name: /Preset Reviewer/ }).click()
+    await expect(nameInput).toHaveValue('Draft Agent')
+    await presetDialog.getByRole('button', { name: 'Apply', exact: true }).click()
+    await expect(modal.getByPlaceholder('Custom name (leave empty to use profile name)')).toHaveValue('Preset Reviewer')
+    await expect(modal.getByPlaceholder('Describe what this agent does...')).toHaveValue('Reviews changes')
+
+    const response = page.waitForResponse(item =>
+      item.request().method() === 'POST'
+      && item.url().endsWith('/api/studio/group-chat/rooms/room-alpha/agents'))
+    await modal.getByRole('button', { name: 'Add', exact: true }).click()
+    await expect((await response).status()).toBe(200)
+    expect(api.addedAgents).toEqual([{
+      roomId: 'room-alpha',
+      body: expect.objectContaining({
+        presetId: 'preset-reviewer',
+        name: 'Preset Reviewer',
+        provider: 'test-provider',
+        model: 'test-model',
+      }),
+    }])
+  })
+
+  test('cancels preset selection without changing the Agent form', async ({ page }) => {
+    await setup(page, '/#/hermes/group-chat/room/room-alpha')
+
+    await page.locator('.agent-avatar-rail-add').click()
+    const modal = page.locator('.modal').filter({ hasText: 'Add Agent' })
+    const nameInput = modal.getByPlaceholder('Custom name (leave empty to use profile name)')
+    await nameInput.fill('Keep this draft')
+    await modal.getByRole('button', { name: 'Choose preset' }).click()
+    const presetDialog = page.locator('.agent-preset-dialog').filter({ hasText: 'Choose preset' })
+    await presetDialog.getByRole('button', { name: /Preset Reviewer/ }).click()
+    await presetDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(presetDialog).toHaveCount(0)
+    await expect(nameInput).toHaveValue('Keep this draft')
+  })
+
+  test('does not offer or apply Agent presets while creating a Room', async ({ page }) => {
+    const api = await setup(page, '/#/hermes/group-chat')
+
+    await page.getByRole('button', { name: 'Create Room', exact: true }).click()
+    const drawer = page.locator('.n-drawer').filter({ hasText: 'Create Room' })
+    await expect(drawer.getByText('Agent presets', { exact: true })).toHaveCount(0)
+    await drawer.getByPlaceholder('Enter room name').fill('Plain Room')
+    await drawer.getByPlaceholder('Enter your display name').fill('Owner')
+
+    const response = page.waitForResponse(item =>
+      item.request().method() === 'POST'
+      && item.url().endsWith('/api/studio/group-chat/rooms'))
+    await drawer.getByRole('button', { name: 'Create', exact: true }).click()
+    await expect((await response).status()).toBe(200)
+    expect(api.createdRooms).toEqual([
+      expect.objectContaining({
+        name: 'Plain Room',
+        agents: [],
+      }),
+    ])
+  })
+
+  test('manages Agent presets only while editing an existing Room Agent', async ({ page }) => {
+    const api = await setup(page, '/#/hermes/group-chat/room/room-alpha')
+
+    await page.locator('.agent-avatar-rail-add').click()
+    const addModal = page.locator('.modal').filter({ hasText: 'Add Agent' })
+    await expect(addModal.getByRole('button', { name: 'Manage presets' })).toHaveCount(0)
+    await addModal.getByRole('button', { name: 'Cancel' }).click()
+
+    await page.getByRole('button', { name: 'Worker' }).click()
+    const editModal = page.locator('.modal').filter({ hasText: 'Edit Worker' })
+    await editModal.getByRole('button', { name: 'Manage presets' }).click()
+    const presetDialog = page.locator('.agent-preset-dialog').filter({ hasText: 'Manage presets' })
+    await presetDialog.getByRole('button', { name: 'Save current Agent as new preset' }).click()
+    await expect.poll(() => api.presetOperations).toContainEqual({
+      method: 'POST',
+      body: expect.objectContaining({ name: 'Worker', description: 'Group agent' }),
+    })
+    await presetDialog.getByPlaceholder('Search presets').fill('Reviewer')
+    await presetDialog.getByRole('button', { name: /Preset Reviewer/ }).click()
+    await expect(editModal.getByPlaceholder('Custom name (leave empty to use profile name)')).toHaveValue('Worker')
+    await presetDialog.getByRole('button', { name: 'Update preset' }).click()
+    await expect.poll(() => api.presetOperations).toContainEqual({
+      method: 'PUT',
+      id: 'preset-reviewer',
+      body: expect.objectContaining({ name: 'Worker', description: 'Group agent' }),
+    })
+    await presetDialog.getByRole('button', { name: 'Delete preset' }).click()
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+    await expect.poll(() => api.presetOperations).toContainEqual({
+      method: 'DELETE',
+      id: 'preset-reviewer',
+    })
+    await expect(editModal.getByPlaceholder('Custom name (leave empty to use profile name)')).toHaveValue('Worker')
+  })
+
   test('member count collapses the default-open scrollable avatar rail', async ({ page }) => {
     await setup(page, '/#/hermes/group-chat/room/room-alpha')
 
@@ -1039,7 +1324,7 @@ test.describe('group chat room deep links', () => {
     await expect(updateButton).toBeDisabled()
 
     await inviteInput.fill(' NEW456 ')
-    const successResponse = page.waitForResponse(response => response.request().method() === 'PUT' && response.url().includes('/api/hermes/group-chat/rooms/room-alpha/invite-code'))
+    const successResponse = page.waitForResponse(response => response.request().method() === 'PUT' && response.url().includes('/api/studio/group-chat/rooms/room-alpha/invite-code'))
     await updateButton.click()
     await expect((await successResponse).status()).toBe(200)
     expect(api.inviteCodeUpdates.at(-1)).toEqual({ roomId: 'room-alpha', body: { inviteCode: 'NEW456' } })
@@ -1047,7 +1332,7 @@ test.describe('group chat room deep links', () => {
     await expect(updateButton).toBeDisabled()
 
     await inviteInput.fill('FAILCODE')
-    const failureResponse = page.waitForResponse(response => response.request().method() === 'PUT' && response.url().includes('/api/hermes/group-chat/rooms/room-alpha/invite-code'))
+    const failureResponse = page.waitForResponse(response => response.request().method() === 'PUT' && response.url().includes('/api/studio/group-chat/rooms/room-alpha/invite-code'))
     await updateButton.click()
     await expect((await failureResponse).status()).toBe(409)
 
@@ -1071,7 +1356,7 @@ test.describe('group chat room deep links', () => {
 
     const response = page.waitForResponse(item =>
       item.request().method() === 'PUT'
-      && item.url().includes('/api/hermes/group-chat/rooms/room-alpha/guest-agent-policy'))
+      && item.url().includes('/api/studio/group-chat/rooms/room-alpha/guest-agent-policy'))
     await section.getByRole('button', { name: 'Save' }).click()
     await expect((await response).status()).toBe(200)
     expect(api.guestAgentPolicyUpdates.at(-1)).toEqual({
@@ -1098,7 +1383,7 @@ test.describe('group chat room deep links', () => {
     await section.locator('.n-input-number input').fill('6')
     const configResponse = page.waitForResponse(response =>
       response.request().method() === 'PUT'
-      && response.url().includes('/api/hermes/group-chat/rooms/room-alpha/config'))
+      && response.url().includes('/api/studio/group-chat/rooms/room-alpha/config'))
     await section.getByRole('button', { name: 'Save' }).click()
     await expect((await configResponse).status()).toBe(200)
     expect(api.roomConfigUpdates.at(-1)).toMatchObject({
@@ -1237,7 +1522,7 @@ test.describe('group chat room deep links', () => {
     await installMockVoiceCapture(page)
     let transcriptions = 0
     await setup(page, '/#/hermes/group-chat/room/room-alpha')
-    await page.route('**/api/hermes/stt/transcribe', async (route) => {
+    await page.route('**/api/studio/stt/transcribe', async (route) => {
       transcriptions += 1
       await route.fulfill({
         status: 200,

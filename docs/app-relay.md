@@ -106,7 +106,7 @@ revocation tombstones so an offline cloud deletion is eventually propagated.
 
 ## Forwarded protocols
 
-- HTTP RPC accepts Studio `/api/**`, `/upload`, and `/health` paths.
+- HTTP RPC accepts Studio `/api/**` and `/health` paths.
 - Request headers, methods, paths, and Socket.IO client events are allowlisted.
 - Request and response bodies are capped at 20 MiB.
 - Socket RPC accepts `/chat-run` and `/group-chat` only.
