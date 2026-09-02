@@ -4,7 +4,7 @@ import { useChatStore } from '@/stores/hermes/chat'
 import { useAppStore } from '@/stores/hermes/app'
 import { useProfilesStore } from '@/stores/hermes/profiles'
 import { useSettingsStore } from '@/stores/hermes/settings'
-import { fetchContextLength } from '@/api/hermes/sessions'
+import { fetchContextLength } from '@/api/studio/sessions'
 import { setModelContext } from '@/api/hermes/model-context'
 import { fetchSkills, type SkillCategory, type SkillInfo } from '@/api/hermes/skills'
 import { deleteSkillBundleApi, fetchSkillBundles, type SkillBundleInfo } from '@/api/hermes/skill-bundles'
@@ -18,6 +18,7 @@ import BundleCreateModal from './BundleCreateModal.vue'
 import { BRIDGE_SESSION_COMMAND_DEFINITIONS } from '@/utils/hermes/bridge-session-commands'
 import { clampChatInputHeight, isMobileChatInputViewport } from '@/utils/chat-input-height'
 import { normalizeComposerVoiceTranscript, useComposerVoiceInput } from '@/composables/useComposerVoiceInput'
+import { extractRepresentativeVideoFrames, isVideoFile } from '@/utils/video-frame-extraction'
 
 const chatStore = useChatStore()
 const appStore = useAppStore()
@@ -31,9 +32,13 @@ const { toolTraceVisible, toggleToolTraceVisible } = useToolTraceVisibility()
 const props = withDefaults(defineProps<{
   modelLabel?: string
   modelDisabled?: boolean
+  initialText?: string
+  persistDraft?: boolean
 }>(), {
   modelLabel: '',
   modelDisabled: false,
+  initialText: '',
+  persistDraft: true,
 })
 
 const emit = defineEmits<{
@@ -114,6 +119,9 @@ const textareaRef = ref<HTMLTextAreaElement>()
 const commandDropdownRef = ref<HTMLDivElement>()
 const fileInputRef = ref<HTMLInputElement>()
 const attachments = ref<Attachment[]>([])
+const pendingVideoFrameJobs = new Set<Promise<void>>()
+const isPreparingAttachments = ref(false)
+let sendAwaitingAttachments = false
 const isDragging = ref(false)
 const dragCounter = ref(0)
 const isComposing = ref(false)
@@ -231,6 +239,7 @@ const isCodingAgentSession = computed(() => {
     || session.agent === 'codex'
     || session.agent === 'claude-code'
     || session.agent === 'pi'
+    || session.agent === 'grok'
   )
 })
 const isForkCommandSession = computed(() => !!chatStore.activeSession && chatStore.activeSession.source !== 'coding_agent')
@@ -497,11 +506,13 @@ function saveDraftForActiveSession(value: string) {
 
 // 从 localStorage 读取设置
 onMounted(() => {
-  loadDraftForActiveSession()
+  if (props.initialText) inputText.value = props.initialText
+  else if (props.persistDraft) loadDraftForActiveSession()
   syncViewport()
   window.addEventListener('resize', syncViewport)
   nextTick(() => {
     applyConfiguredTextareaHeight()
+    if (props.initialText) focusComposer()
   })
 })
 
@@ -517,11 +528,12 @@ function handleInputSettingsSelect(key: string | number) {
 }
 
 watch(inputText, (value) => {
-  saveDraftForActiveSession(value)
+  if (props.persistDraft) saveDraftForActiveSession(value)
 })
 
 watch(() => chatStore.activeSession?.id, () => {
-  loadDraftForActiveSession()
+  if (props.persistDraft) loadDraftForActiveSession()
+  else inputText.value = props.initialText
   nextTick(() => {
     applyConfiguredTextareaHeight()
   })
@@ -832,6 +844,33 @@ function addFile(file: File, context?: string) {
     file,
     ...(context?.trim() ? { context: context.trim() } : {}),
   })
+  if (!isVideoFile(file)) return
+
+  let job: Promise<void>
+  job = extractRepresentativeVideoFrames(file)
+    .then((frames) => {
+      if (!attachments.value.some(attachment => attachment.id === id)) return
+      for (const frame of frames) {
+        attachments.value.push({
+          id: `${id}-frame-${attachments.value.length}`,
+          name: frame.name,
+          type: frame.type,
+          size: frame.size,
+          url: URL.createObjectURL(frame),
+          file: frame,
+          videoFrameFor: id,
+        })
+      }
+    })
+    .catch(() => {
+      // Keep the original video attachment. Coding agents can still inspect its local path.
+    })
+    .finally(() => {
+      pendingVideoFrameJobs.delete(job)
+      isPreparingAttachments.value = pendingVideoFrameJobs.size > 0
+    })
+  pendingVideoFrameJobs.add(job)
+  isPreparingAttachments.value = true
 }
 
 function addFiles(files: File[]) {
@@ -909,7 +948,18 @@ defineExpose({ addFiles, addBrowserAttachment, focusComposer })
 
 // --- Send ---
 
-function handleSend() {
+async function handleSend() {
+  if (isPreparingAttachments.value) {
+    if (sendAwaitingAttachments) return
+    sendAwaitingAttachments = true
+    try {
+      while (pendingVideoFrameJobs.size > 0) {
+        await Promise.allSettled([...pendingVideoFrameJobs])
+      }
+    } finally {
+      sendAwaitingAttachments = false
+    }
+  }
   const text = inputText.value.trim()
   if (!text && attachments.value.length === 0) return
   if (isBridgeSession.value && text === '/skill' && attachments.value.length === 0) {
@@ -1014,11 +1064,13 @@ onUnmounted(() => {
 })
 
 function removeAttachment(id: string) {
-  const idx = attachments.value.findIndex(a => a.id === id)
-  if (idx !== -1) {
-    URL.revokeObjectURL(attachments.value[idx].url)
-    attachments.value.splice(idx, 1)
+  const removedIds = new Set([id])
+  for (const attachment of attachments.value) {
+    if (attachment.videoFrameFor === id) removedIds.add(attachment.id)
   }
+  const removed = attachments.value.filter(attachment => removedIds.has(attachment.id))
+  for (const attachment of removed) URL.revokeObjectURL(attachment.url)
+  attachments.value = attachments.value.filter(attachment => !removedIds.has(attachment.id))
 }
 
 function formatSize(bytes: number): string {
@@ -1035,9 +1087,9 @@ function isImage(type: string): boolean {
 <template>
   <div class="chat-input-area">
     <!-- Attachment previews -->
-    <div v-if="attachments.length > 0" class="attachment-previews">
+    <div v-if="attachments.some(att => !att.videoFrameFor)" class="attachment-previews">
       <div
-        v-for="att in attachments"
+        v-for="att in attachments.filter(item => !item.videoFrameFor)"
         :key="att.id"
         class="attachment-preview"
         :class="{ image: isImage(att.type), 'has-context': !!att.context }"

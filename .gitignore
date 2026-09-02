@@ -31,6 +31,15 @@ packages/desktop/resources/python/
 packages/desktop/node_modules/
 packages/*/.pio/
 packages/*/*/.pio/
+# ESP-IDF build artifacts
+packages/*/build/
+packages/*/*/build/
+packages/*/managed_components/
+packages/*/*/managed_components/
+packages/*/sdkconfig
+packages/*/*/sdkconfig
+packages/*/dependencies.lock
+packages/*/*/dependencies.lock
 
 # Hermes config files (should be in user data directory, not project root)
 config.yaml

@@ -11,7 +11,7 @@ const TEST_DB_PATH = resolve(TEST_DB_DIR, 'test-hermes.db')
 let testDbInstance: DatabaseSync | null = null
 
 // Mock getDb to return our test database
-vi.mock('../../packages/server/src/db/index', () => ({
+vi.mock('../../packages/server/src/modules/studio/infrastructure/database/index', () => ({
   getDb: () => testDbInstance,
   getStoragePath: () => TEST_DB_PATH,
 }))
@@ -122,7 +122,7 @@ describe('Database Schema Synchronization', () => {
         MCU_DEVICES_TABLE,
         MCU_DEVICES_SCHEMA,
       } =
-        await import('../../packages/server/src/db/hermes/schemas')
+        await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
 
       initAllHermesTables()
 
@@ -207,7 +207,7 @@ describe('Database Schema Synchronization', () => {
       const {
         initAllHermesTables,
         WORKFLOW_RUN_NODE_SESSIONS_TABLE,
-      } = await import('../../packages/server/src/db/hermes/schemas')
+      } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
       const db = getTestDb()
 
       db.exec(`
@@ -271,7 +271,7 @@ describe('Database Schema Synchronization', () => {
       const {
         initAllHermesTables,
         WORKFLOW_RUN_NODE_SESSIONS_TABLE,
-      } = await import('../../packages/server/src/db/hermes/schemas')
+      } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
       const db = getTestDb()
 
       db.exec(`
@@ -316,7 +316,7 @@ describe('Database Schema Synchronization', () => {
       const {
         initAllHermesTables,
         WORKFLOW_RUN_EDGE_EVALUATIONS_TABLE,
-      } = await import('../../packages/server/src/db/hermes/schemas')
+      } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
       const db = getTestDb()
       const archiveTable = `${WORKFLOW_RUN_EDGE_EVALUATIONS_TABLE}__legacy_v1`
 
@@ -371,7 +371,7 @@ describe('Database Schema Synchronization', () => {
         WORKSPACE_RUN_CHANGES_TABLE,
         WORKSPACE_RUN_CHANGES_SCHEMA,
         WORKSPACE_RUN_CHANGES_INDEXES,
-      } = await import('../../packages/server/src/db/hermes/schemas')
+      } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
       const db = getTestDb()
       const legacySchema = Object.fromEntries(
         Object.entries(WORKSPACE_RUN_CHANGES_SCHEMA).filter(([name]) => name !== 'assistant_message_id'),
@@ -402,7 +402,7 @@ describe('Database Schema Synchronization', () => {
     })
 
     it('adds missing safe columns to existing table without rebuilding', async () => {
-      const { syncTable, USAGE_TABLE, USAGE_SCHEMA } = await import('../../packages/server/src/db/hermes/schemas')
+      const { syncTable, USAGE_TABLE, USAGE_SCHEMA } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
 
       // Create initial table without some columns
       const db = getTestDb()
@@ -433,7 +433,7 @@ describe('Database Schema Synchronization', () => {
     })
 
     it('adds created_at to legacy session_usage tables missing the column', async () => {
-      const { syncTable, USAGE_TABLE, USAGE_SCHEMA } = await import('../../packages/server/src/db/hermes/schemas')
+      const { syncTable, USAGE_TABLE, USAGE_SCHEMA } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
 
       const db = getTestDb()
       db.exec(`CREATE TABLE "${USAGE_TABLE}" (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL)`)
@@ -452,7 +452,7 @@ describe('Database Schema Synchronization', () => {
   describe('Schema sync with single-column primary keys', () => {
     it('creates table with single-column primary key', async () => {
       const { syncTable, GC_ROOM_AGENTS_TABLE, GC_ROOM_AGENTS_SCHEMA } =
-        await import('../../packages/server/src/db/hermes/schemas')
+        await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
 
       syncTable(GC_ROOM_AGENTS_TABLE, GC_ROOM_AGENTS_SCHEMA, {
         primaryKey: 'id',
@@ -497,7 +497,7 @@ describe('Database Schema Synchronization', () => {
   describe('Destructive schema changes are not applied automatically', () => {
     it('does not rebuild table when primary key differs', async () => {
       const { syncTable, GC_ROOM_MEMBERS_TABLE, GC_ROOM_MEMBERS_SCHEMA } =
-        await import('../../packages/server/src/db/hermes/schemas')
+        await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
 
       const db = getTestDb()
 
@@ -525,7 +525,7 @@ describe('Database Schema Synchronization', () => {
     })
 
     it('does not rebuild table when column types differ', async () => {
-      const { syncTable, USAGE_TABLE, USAGE_SCHEMA } = await import('../../packages/server/src/db/hermes/schemas')
+      const { syncTable, USAGE_TABLE, USAGE_SCHEMA } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
 
       const db = getTestDb()
 
@@ -551,7 +551,7 @@ describe('Database Schema Synchronization', () => {
   describe('Index synchronization', () => {
     it('creates specified indexes on table', async () => {
       const { syncTable, MESSAGES_TABLE, MESSAGES_SCHEMA } =
-        await import('../../packages/server/src/db/hermes/schemas')
+        await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
 
       syncTable(MESSAGES_TABLE, MESSAGES_SCHEMA, {
         indexes: {
@@ -568,7 +568,7 @@ describe('Database Schema Synchronization', () => {
 
     it('does not alter indexes on existing tables', async () => {
       const { syncTable, MESSAGES_TABLE, MESSAGES_SCHEMA } =
-        await import('../../packages/server/src/db/hermes/schemas')
+        await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
 
       const db = getTestDb()
 
@@ -595,7 +595,7 @@ describe('Database Schema Synchronization', () => {
 
   describe('Data preservation during schema sync', () => {
     it('preserves data when adding safe columns', async () => {
-      const { syncTable, USAGE_TABLE, USAGE_SCHEMA } = await import('../../packages/server/src/db/hermes/schemas')
+      const { syncTable, USAGE_TABLE, USAGE_SCHEMA } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
 
       const db = getTestDb()
 
@@ -620,7 +620,7 @@ describe('Database Schema Synchronization', () => {
 
     it('preserves data and existing table definition when primary key is missing', async () => {
       const { syncTable, GC_ROOM_AGENTS_TABLE, GC_ROOM_AGENTS_SCHEMA } =
-        await import('../../packages/server/src/db/hermes/schemas')
+        await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
 
       const db = getTestDb()
 
@@ -651,7 +651,7 @@ describe('Database Schema Synchronization', () => {
 
   describe('Column preservation', () => {
     it('keeps extra columns on existing table', async () => {
-      const { syncTable, USAGE_TABLE, USAGE_SCHEMA } = await import('../../packages/server/src/db/hermes/schemas')
+      const { syncTable, USAGE_TABLE, USAGE_SCHEMA } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
 
       // Create table with extra columns
       const db = getTestDb()
@@ -682,7 +682,7 @@ describe('Database Schema Synchronization', () => {
         initAllHermesTables,
         LEGACY_MODEL_CONTEXT_INDEX,
         MODEL_CONTEXT_TABLE,
-      } = await import('../../packages/server/src/db/hermes/schemas')
+      } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
       const db = getTestDb()
       db.exec(`CREATE TABLE "${MODEL_CONTEXT_TABLE}" (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

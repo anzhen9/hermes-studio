@@ -42,7 +42,7 @@ custom_providers:
 Endpoint:
 
 ```bash
-POST <Hermes Web UI base URL>/api/hermes/media/apikey-image-generate
+POST <Hermes Web UI base URL>/api/studio/media/apikey-image-generate
 ```
 
 Resolve the Hermes Web UI base URL in this order:
@@ -179,7 +179,7 @@ if [ -z "$BASE_URL" ]; then
 fi
 BASE_URL="${BASE_URL%/}"
 
-curl -sS -X POST "$BASE_URL/api/hermes/media/apikey-image-generate" \
+curl -sS -X POST "$BASE_URL/api/studio/media/apikey-image-generate" \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{

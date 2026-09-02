@@ -2,8 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NAlert, NButton, NEmpty, NInput, NModal, NSelect, NSpin, NTabPane, NTabs, NTag, useDialog, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import { fetchPetdexManifest, type PetdexManifest, type PetdexPet } from '@/api/hermes/petdex'
-import { deleteLocalPet, fetchLocalPets, importLocalPet, type LocalImportedPet } from '@/api/hermes/pets'
+import { fetchPetdexManifest, type PetdexManifest, type PetdexPet } from '@/api/studio/petdex'
+import { deleteLocalPet, fetchLocalPets, importLocalPet, type LocalImportedPet } from '@/api/studio/pets'
 import { getActiveProfileName, getApiKey, getBaseUrlValue } from '@/api/client'
 import { usePetsStore } from '@/stores/hermes/pets'
 import { desktopBridge } from '@/utils/desktop-bridge'
@@ -75,14 +75,20 @@ watch(previewUrl, (url) => {
 
 const spriteDimensions = ref<{ width: number; height: number } | null>(null)
 
-watch(spritesheetFile, (file) => {
+watch(spritesheetFile, () => {
   spriteDimensions.value = null
-  if (!file) return
+  // Reuse the managed previewUrl blob (already revoke-on-replace) instead of
+  // creating a second one here, which would leak.
+  const url = previewUrl.value
+  if (!url) return
   const img = new Image()
   img.onload = () => {
     spriteDimensions.value = { width: img.naturalWidth, height: img.naturalHeight }
   }
-  img.src = URL.createObjectURL(file)
+  img.onerror = () => {
+    spriteDimensions.value = null
+  }
+  img.src = url
 })
 
 const previewStyle = computed(() => {
@@ -235,10 +241,10 @@ async function ensureLocalPetBlobUrl(slug: string): Promise<string | null> {
     try {
       // Try the dedicated preview first (first-frame only). Fall back to the
       // full spritesheet so older imports without preview.png still render.
-      let url = `${getApiBaseUrl()}/api/hermes/pets/local/${encodeURIComponent(slug)}/preview`
+      let url = `${getApiBaseUrl()}/api/studio/pets/local/${encodeURIComponent(slug)}/preview`
       let res = await fetch(url, { headers: buildAuthHeaders() })
       if (!res.ok) {
-        url = `${getApiBaseUrl()}/api/hermes/pets/local/${encodeURIComponent(slug)}/asset`
+        url = `${getApiBaseUrl()}/api/studio/pets/local/${encodeURIComponent(slug)}/asset`
         res = await fetch(url, { headers: buildAuthHeaders() })
         if (!res.ok) return null
       }
@@ -759,7 +765,6 @@ onMounted(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: var(--bg-primary);
   color: var(--text-primary);
 }
 

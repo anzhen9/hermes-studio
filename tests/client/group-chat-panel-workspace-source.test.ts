@@ -2,13 +2,15 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 describe('GroupChatPanel workspace save handling', () => {
-  it('offers Pi in ordinary and paired group chat and filters it as the Pi provider target', () => {
+  it('offers Pi and Grok in ordinary and paired group chat and filters each provider target', () => {
     const panel = readFileSync('packages/client/src/components/hermes/group-chat/GroupChatPanel.vue', 'utf8')
     const linkView = readFileSync('packages/client/src/views/hermes/GroupChatLinkView.vue', 'utf8')
 
     for (const source of [panel, linkView]) {
       expect(source).toContain("{ label: 'Pi', value: 'pi' }")
       expect(source).toMatch(/selectedAgentType\.value === 'pi'[\s\S]*?\\? 'pi'/)
+      expect(source).toContain("{ label: 'Grok', value: 'grok' }")
+      expect(source).toContain("selectedAgentType.value === 'grok'")
     }
   })
 
@@ -396,10 +398,27 @@ describe('GroupChatPanel workspace save handling', () => {
     expect(panel).toContain(':active-agent-ids="store.activeAgentIdsForRoom(room.id)"')
     expect(roomAvatar).toContain('data-agent-count')
     expect(roomAvatar).toContain('room-agent-grid-neutral')
+    expect(roomAvatar).toContain(`:class="{ 'is-active': hasActiveAgent }"`)
+    expect(roomAvatar).toContain(':aria-busy="hasActiveAgent"')
+    expect(roomAvatar).not.toContain(`:class="{ 'is-active': activeAgentIds.has(agent.id) }"`)
+    expect(roomAvatar).not.toContain(`:class="{ 'is-active': overflowActive }"`)
+    expect(roomAvatar).toContain('animation: room-avatar-rainbow-glow 4s linear infinite')
+    expect(roomAvatar).toContain('@keyframes room-avatar-rainbow-glow')
+    expect(roomAvatar).toMatch(/\.room-agent-grid[\s\S]*?&\.is-active::after\s*\{[\s\S]*?border-radius: 12px;/)
+    expect(roomAvatar).toContain('0 0 0 2px #ff6b6b')
+    expect(roomAvatar).toContain('0 0 0 2px #48dbfb')
+    expect(roomAvatar).toContain('0 0 0 2px #5f27cd')
+    expect(roomAvatar).not.toContain('background: $success')
     expect(roomAvatar).toContain('@media (prefers-reduced-motion: reduce)')
     expect(list).toContain(':active="store.isAgentRunActive(')
     expect(runCard).toContain("'run-avatar-active': active")
     expect(runCard).toContain(':aria-busy="active"')
+    expect(runCard).toMatch(/\.run-avatar\s*\{[^}]*border-radius: 50%;/s)
+    expect(runCard).toContain('animation: run-avatar-rainbow-glow 4s linear infinite')
+    expect(runCard).toContain('@keyframes run-avatar-rainbow-glow')
+    expect(runCard).toContain('0 0 0 2px #ff6b6b')
+    expect(runCard).toContain('0 0 0 2px #48dbfb')
+    expect(runCard).toContain('0 0 0 2px #5f27cd')
     expect(runCard).toContain('@media (prefers-reduced-motion: reduce)')
   })
 
@@ -501,18 +520,32 @@ describe('GroupChatPanel workspace save handling', () => {
 
   it('creates room agents with the single-chat api mode rules and keeps Hermes profile-owned', () => {
     const source = readFileSync('packages/client/src/components/hermes/group-chat/GroupChatPanel.vue', 'utf8')
+    const linkView = readFileSync('packages/client/src/views/hermes/GroupChatLinkView.vue', 'utf8')
 
     expect(source).toContain("const selectedAgentProvider = ref('')")
     expect(source).toContain("const selectedAgentModel = ref('')")
     expect(source).toContain("const selectedAgentApiMode = ref<CodingAgentApiMode>('codex_responses')")
     expect(source).toContain("const selectedAgentReasoningEffort = ref('')")
-    expect(source).toContain('provider: selectedAgentProvider.value')
-    expect(source).toContain('model: selectedAgentModel.value')
-    expect(source).toContain("apiMode: selectedAgentType.value === 'hermes' ? undefined : selectedAgentApiMode.value")
-    expect(source).toContain('reasoningEffort: selectedAgentReasoningEffort.value')
+    expect(source).toContain("agentMode: usesGlobalAgentMode.value ? 'global' : 'scoped'")
+    expect(source).toContain("provider: usesGlobalAgentMode.value ? '' : selectedAgentProvider.value")
+    expect(source).toContain("model: usesGlobalAgentMode.value ? '' : selectedAgentModel.value")
+    expect(source).toContain("apiMode: selectedAgentType.value === 'hermes' || usesGlobalAgentMode.value ? undefined : selectedAgentApiMode.value")
+    expect(source).toContain("reasoningEffort: usesGlobalAgentMode.value ? '' : selectedAgentReasoningEffort.value")
+    for (const modelSource of [source, linkView]) {
+      expect(modelSource).toContain('function handleAgentModelChange(model: string)')
+      expect(modelSource).toContain("selectedAgentReasoningEffort.value = ''")
+      expect(modelSource).toContain('@update:value="handleAgentModelChange"')
+    }
     expect(source).toContain('inferCodingAgentApiMode(')
     expect(source).toContain('normalizeCodingAgentApiMode(')
-    expect(source).toContain("v-if=\"selectedAgentType !== 'hermes'\"")
+    expect(source).toContain("v-if=\"selectedAgentType !== 'hermes' && !usesGlobalAgentMode\"")
+    for (const modelSource of [source, linkView]) {
+      expect(modelSource).toContain("const supportsGlobalAgentMode = computed(() => ['claude', 'codex', 'pi', 'grok'].includes(selectedAgentType.value))")
+      expect(modelSource).toContain("v-if=\"!usesGlobalAgentMode\"")
+    }
+    expect(source).toContain('@update:value="handleAgentModeChange"')
+    expect(source).toContain('selectedAgentPresetId.value = null')
+    expect(linkView).toContain('v-model:value="selectedAgentMode"')
     expect(source).toContain('agent: selectedAgentType.value')
     expect(source).toContain("{ label: 'Hermes', value: 'hermes' }")
     expect(source).toContain("{ label: 'Claude', value: 'claude' }")
